@@ -1,0 +1,119 @@
+INFO:     Will watch for changes in these directories: ['C:\\Users\\Administrator\\Desktop\\my_ai_assistant']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [25300] using WatchFiles
+C:\Users\Administrator\Desktop\my_ai_assistant\backend\services\vector_service.py:10: LangChainDeprecationWarning: Importing Chroma from langchain_classic.vectorstores is deprecated. Please replace deprecated imports:
+
+>> from langchain_classic.vectorstores import Chroma
+
+with new imports of:
+
+>> from langchain_community.vectorstores import Chroma
+You can use the langchain cli to **automatically** upgrade many imports. Please see documentation here <https://python.langchain.com/docs/versions/v0_2/>
+  from langchain_classic.vectorstores import Chroma
+INFO:     Started server process [26560]
+INFO:     Waiting for application startup.
+2026-09-10 17:09:54,954 - backend.main - INFO -  AI助手启动中...
+2026-09-10 17:09:54,959 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-10 17:09:54,960 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("users")
+2026-09-10 17:09:54,960 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-10 17:09:54,961 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("user_session")
+2026-09-10 17:09:54,962 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-10 17:09:54,962 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("ai_characters")
+2026-09-10 17:09:54,962 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-10 17:09:54,963 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("conversations")
+2026-09-10 17:09:54,963 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-10 17:09:54,963 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("texts")
+2026-09-10 17:09:54,964 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-10 17:09:54,965 - sqlalchemy.engine.Engine - INFO - COMMIT
+2026-09-10 17:09:54,966 - backend.main - INFO -  初始化完成
+INFO:     Application startup complete.
+2026-09-10 17:12:20,158 - backend.main - INFO - POST /api/v1/auth/register
+2026-09-10 17:12:20,166 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-10 17:12:20,169 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.username = ? OR users.email = ?
+ LIMIT ? OFFSET ?
+2026-09-10 17:12:20,169 - sqlalchemy.engine.Engine - INFO - [generated in 0.00043s] ('envtest', 'envtest@example.com', 1, 0)
+2026-09-10 17:12:20,356 - sqlalchemy.engine.Engine - INFO - INSERT INTO users (username, email, hashed_password, full_name, is_active, is_superuser, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+2026-09-10 17:12:20,358 - sqlalchemy.engine.Engine - INFO - [generated in 0.00089s] ('envtest', 'envtest@example.com', '$2b$12$s.y4x61rqeJVtnqZEhHXK./PN2iCXD/A0xBQYihGb2FmgNibRenLe', 'Env Test', 1, 0, None)
+2026-09-10 17:12:20,358 - sqlalchemy.engine.Engine - INFO - COMMIT
+2026-09-10 17:12:20,365 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-10 17:12:20,366 - sqlalchemy.engine.Engine - INFO - SELECT users.id, users.username, users.email, users.hashed_password, users.full_name, users.is_active, users.is_superuser, users.created_at, users.updated_at 
+FROM users 
+WHERE users.id = ?
+2026-09-10 17:12:20,366 - sqlalchemy.engine.Engine - INFO - [generated in 0.00043s] (148,)
+2026-09-10 17:12:20,368 - app.request - INFO - POST /api/v1/auth/register 200 209.64ms
+2026-09-10 17:12:20,368 - backend.main - INFO -     200 (0.210s)
+2026-09-10 17:12:20,369 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-10 17:12:20,411 - backend.main - INFO - POST /api/v1/auth/login
+2026-09-10 17:12:20,415 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-10 17:12:20,416 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.username = ?
+ LIMIT ? OFFSET ?
+2026-09-10 17:12:20,417 - sqlalchemy.engine.Engine - INFO - [generated in 0.00053s] ('envtest', 1, 0)
+2026-09-10 17:12:20,630 - app.request - INFO - POST /api/v1/auth/login 200 218.28ms
+2026-09-10 17:12:20,631 - backend.main - INFO -     200 (0.220s)
+2026-09-10 17:12:20,631 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-10 17:12:50,429 - backend.main - INFO - POST /api/v1/auth/login
+2026-09-10 17:12:50,436 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-10 17:12:50,437 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.username = ?
+ LIMIT ? OFFSET ?
+2026-09-10 17:12:50,437 - sqlalchemy.engine.Engine - INFO - [cached since 30.02s ago] ('envtest', 1, 0)
+2026-09-10 17:12:50,643 - app.request - INFO - POST /api/v1/auth/login 200 211.13ms
+2026-09-10 17:12:50,644 - backend.main - INFO -     200 (0.215s)
+2026-09-10 17:12:50,644 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-10 17:12:50,714 - backend.main - INFO - POST /api/v1/rag/upload
+2026-09-10 17:12:50,718 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-10 17:12:50,719 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.id = ?
+ LIMIT ? OFFSET ?
+2026-09-10 17:12:50,720 - sqlalchemy.engine.Engine - INFO - [generated in 0.00062s] (148, 1, 0)
+2026-09-10 17:12:50,720 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-10 17:12:50,727 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-10 17:12:50,727 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.id = ?
+ LIMIT ? OFFSET ?
+2026-09-10 17:12:50,727 - sqlalchemy.engine.Engine - INFO - [cached since 0.00843s ago] (148, 1, 0)
+C:\Users\Administrator\Desktop\my_ai_assistant\backend\services\vector_service.py:92: LangChainDeprecationWarning: The class `Chroma` was deprecated in LangChain 0.2.9 and will be removed in 1.0. An updated version of the class exists in the `langchain-chroma package and should be used instead. To use it run `pip install -U `langchain-chroma` and import as `from `langchain_chroma import Chroma``.
+  self.vector_store = Chroma(
+2026-09-10 17:12:52,794 - backend.services.rag_service - INFO -  RAG服务初始化（带缓存）
+2026-09-10 17:12:52,794 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-10 17:12:52,796 - app.request - INFO - POST /api/v1/rag/upload 400 2081.47ms
+2026-09-10 17:12:52,797 - backend.main - INFO -     400 (2.083s)
+WARNING:  WatchFiles detected changes in '_parsechk.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+2026-09-10 17:16:50,569 - backend.main - INFO -  AI助手后端关闭
+INFO:     Application shutdown complete.
+INFO:     Finished server process [26560]
+C:\Users\Administrator\Desktop\my_ai_assistant\backend\services\vector_service.py:10: LangChainDeprecationWarning: Importing Chroma from langchain_classic.vectorstores is deprecated. Please replace deprecated imports:
+
+>> from langchain_classic.vectorstores import Chroma
+
+with new imports of:
+
+>> from langchain_community.vectorstores import Chroma
+You can use the langchain cli to **automatically** upgrade many imports. Please see documentation here <https://python.langchain.com/docs/versions/v0_2/>
+  from langchain_classic.vectorstores import Chroma
+INFO:     Started server process [23324]
+INFO:     Waiting for application startup.
+2026-09-10 17:16:52,866 - backend.main - INFO -  AI助手启动中...
+2026-09-10 17:16:52,872 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-10 17:16:52,872 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("users")
+2026-09-10 17:16:52,873 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-10 17:16:52,873 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("user_session")
+2026-09-10 17:16:52,877 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-10 17:16:52,878 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("ai_characters")
+2026-09-10 17:16:52,878 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-10 17:16:52,892 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("conversations")
+2026-09-10 17:16:52,893 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-10 17:16:52,894 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("texts")
+2026-09-10 17:16:52,894 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-10 17:16:52,896 - sqlalchemy.engine.Engine - INFO - COMMIT
+2026-09-10 17:16:52,898 - backend.main - INFO -  初始化完成
+INFO:     Application startup complete.

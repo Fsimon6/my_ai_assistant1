@@ -1,0 +1,51 @@
+# 环境变量与密钥（切勿提交真实密钥）
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+backend/.venv/
+
+# 前端依赖与构建产物
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# 运行时数据（Chroma 向量库 / 用户上传 / SQLite）
+data/
+logs/
+cache/
+coverage/
+test-reports/
+.pytest_cache/
+
+# 数据库 / 日志 / 系统垃圾
+*.log
+*.db
+*.sqlite3
+*.sqlite
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 编辑器 / OS
+.idea/
+.vscode/
+
+# 其它 stray 虚拟环境 / 用户文档（运行产物，不进版本控制）
+.stage1_venv/
+*.xlsx
+*.xls

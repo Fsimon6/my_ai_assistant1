@@ -1,0 +1,126 @@
+C:\Users\Administrator\Desktop\my_ai_assistant\backend\services\vector_service.py:10: LangChainDeprecationWarning: Importing Chroma from langchain_classic.vectorstores is deprecated. Please replace deprecated imports:
+
+>> from langchain_classic.vectorstores import Chroma
+
+with new imports of:
+
+>> from langchain_community.vectorstores import Chroma
+You can use the langchain cli to **automatically** upgrade many imports. Please see documentation here <https://python.langchain.com/docs/versions/v0_2/>
+  from langchain_classic.vectorstores import Chroma
+INFO:     Started server process [5884]
+INFO:     Waiting for application startup.
+2026-09-01 14:26:33,229 - backend.main - INFO -  AI助手启动中...
+2026-09-01 14:26:33,236 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-01 14:26:33,237 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("users")
+2026-09-01 14:26:33,238 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-01 14:26:33,240 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("user_session")
+2026-09-01 14:26:33,241 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-01 14:26:33,241 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("ai_characters")
+2026-09-01 14:26:33,242 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-01 14:26:33,242 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("conversations")
+2026-09-01 14:26:33,243 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-01 14:26:33,243 - sqlalchemy.engine.Engine - INFO - PRAGMA main.table_info("texts")
+2026-09-01 14:26:33,244 - sqlalchemy.engine.Engine - INFO - [raw sql] ()
+2026-09-01 14:26:33,244 - sqlalchemy.engine.Engine - INFO - COMMIT
+2026-09-01 14:26:33,245 - backend.main - INFO -  初始化完成
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+2026-09-01 14:26:40,988 - backend.main - INFO - GET /health
+2026-09-01 14:26:40,989 - app.request - INFO - GET /health 200 0.00ms
+2026-09-01 14:26:40,990 - backend.main - INFO -     200 (0.002s)
+2026-09-01 14:26:44,998 - backend.main - INFO - GET /health
+2026-09-01 14:26:44,999 - app.request - INFO - GET /health 200 1.00ms
+2026-09-01 14:26:44,999 - backend.main - INFO -     200 (0.002s)
+2026-09-01 14:26:58,937 - backend.main - INFO - POST /api/v1/auth/register
+2026-09-01 14:26:58,938 - app.request - INFO - POST /api/v1/auth/register 422 1.00ms
+2026-09-01 14:26:58,939 - backend.main - INFO -     422 (0.002s)
+2026-09-01 14:26:58,964 - backend.main - INFO - POST /api/v1/auth/login
+2026-09-01 14:26:58,965 - app.request - INFO - POST /api/v1/auth/login 422 1.00ms
+2026-09-01 14:26:58,966 - backend.main - INFO -     422 (0.002s)
+2026-09-01 14:26:58,992 - backend.main - INFO - GET /api/v1/characters
+2026-09-01 14:26:58,992 - app.request - INFO - GET /api/v1/characters 401 0.00ms
+2026-09-01 14:26:58,993 - backend.main - INFO -     401 (0.001s)
+2026-09-01 14:27:09,655 - backend.main - INFO - POST /api/v1/auth/register
+2026-09-01 14:27:09,657 - app.request - INFO - POST /api/v1/auth/register 422 1.00ms
+2026-09-01 14:27:09,658 - backend.main - INFO -     422 (0.003s)
+2026-09-01 14:27:09,686 - backend.main - INFO - POST /api/v1/auth/login
+2026-09-01 14:27:09,688 - app.request - INFO - POST /api/v1/auth/login 422 1.00ms
+2026-09-01 14:27:09,688 - backend.main - INFO -     422 (0.002s)
+2026-09-01 14:27:34,273 - backend.main - INFO - POST /api/v1/auth/register
+2026-09-01 14:27:34,279 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-01 14:27:34,281 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.username = ? OR users.email = ?
+ LIMIT ? OFFSET ?
+2026-09-01 14:27:34,281 - sqlalchemy.engine.Engine - INFO - [generated in 0.00040s] ('chk2_142734', 'chk2_142734@t.com', 1, 0)
+2026-09-01 14:27:34,481 - sqlalchemy.engine.Engine - INFO - INSERT INTO users (username, email, hashed_password, full_name, is_active, is_superuser, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+2026-09-01 14:27:34,481 - sqlalchemy.engine.Engine - INFO - [generated in 0.00076s] ('chk2_142734', 'chk2_142734@t.com', '$2b$12$o3yN99sZM2h48vbX6R6phOsjQuvPL84L/jSO29XxuDxIHl8khRdAG', 'chk', 1, 0, None)
+2026-09-01 14:27:34,483 - sqlalchemy.engine.Engine - INFO - COMMIT
+2026-09-01 14:27:34,487 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-01 14:27:34,488 - sqlalchemy.engine.Engine - INFO - SELECT users.id, users.username, users.email, users.hashed_password, users.full_name, users.is_active, users.is_superuser, users.created_at, users.updated_at 
+FROM users 
+WHERE users.id = ?
+2026-09-01 14:27:34,489 - sqlalchemy.engine.Engine - INFO - [generated in 0.00049s] (9,)
+2026-09-01 14:27:34,490 - app.request - INFO - POST /api/v1/auth/register 200 215.00ms
+2026-09-01 14:27:34,490 - backend.main - INFO -     200 (0.217s)
+2026-09-01 14:27:34,491 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-01 14:27:34,493 - backend.main - INFO - POST /api/v1/auth/login
+2026-09-01 14:27:34,495 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-01 14:27:34,495 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.username = ?
+ LIMIT ? OFFSET ?
+2026-09-01 14:27:34,496 - sqlalchemy.engine.Engine - INFO - [generated in 0.00042s] ('chk2_142734', 1, 0)
+2026-09-01 14:27:34,708 - app.request - INFO - POST /api/v1/auth/login 200 214.83ms
+2026-09-01 14:27:34,709 - backend.main - INFO -     200 (0.216s)
+2026-09-01 14:27:34,709 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-01 14:27:34,711 - backend.main - INFO - GET /api/v1/auth/me
+2026-09-01 14:27:34,713 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-01 14:27:34,714 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.id = ?
+ LIMIT ? OFFSET ?
+2026-09-01 14:27:34,714 - sqlalchemy.engine.Engine - INFO - [generated in 0.00046s] (9, 1, 0)
+2026-09-01 14:27:34,715 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-01 14:27:34,717 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-01 14:27:34,718 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.id = ?
+ LIMIT ? OFFSET ?
+2026-09-01 14:27:34,718 - sqlalchemy.engine.Engine - INFO - [cached since 0.004167s ago] (9, 1, 0)
+2026-09-01 14:27:34,719 - app.request - INFO - GET /api/v1/auth/me 200 8.00ms
+2026-09-01 14:27:34,720 - backend.main - INFO -     200 (0.009s)
+2026-09-01 14:27:34,721 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-01 14:27:34,723 - backend.main - INFO - GET /api/v1/characters
+2026-09-01 14:27:34,724 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-01 14:27:34,724 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.id = ?
+ LIMIT ? OFFSET ?
+2026-09-01 14:27:34,725 - sqlalchemy.engine.Engine - INFO - [cached since 0.01128s ago] (9, 1, 0)
+2026-09-01 14:27:34,726 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-01 14:27:34,728 - app.request - INFO - GET /api/v1/characters 307 4.00ms
+2026-09-01 14:27:34,728 - backend.main - INFO -     307 (0.005s)
+2026-09-01 14:27:34,730 - backend.main - INFO - GET /api/v1/characters/
+2026-09-01 14:27:34,731 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-01 14:27:34,732 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.id = ?
+ LIMIT ? OFFSET ?
+2026-09-01 14:27:34,732 - sqlalchemy.engine.Engine - INFO - [cached since 0.01798s ago] (9, 1, 0)
+2026-09-01 14:27:34,733 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-01 14:27:34,735 - sqlalchemy.engine.Engine - INFO - BEGIN (implicit)
+2026-09-01 14:27:34,735 - sqlalchemy.engine.Engine - INFO - SELECT users.id AS users_id, users.username AS users_username, users.email AS users_email, users.hashed_password AS users_hashed_password, users.full_name AS users_full_name, users.is_active AS users_is_active, users.is_superuser AS users_is_superuser, users.created_at AS users_created_at, users.updated_at AS users_updated_at 
+FROM users 
+WHERE users.id = ?
+ LIMIT ? OFFSET ?
+2026-09-01 14:27:34,736 - sqlalchemy.engine.Engine - INFO - [cached since 0.0217s ago] (9, 1, 0)
+2026-09-01 14:27:34,737 - app.request - INFO - GET /api/v1/characters/ 200 7.00ms
+2026-09-01 14:27:34,737 - backend.main - INFO -     200 (0.007s)
+2026-09-01 14:27:34,738 - sqlalchemy.engine.Engine - INFO - ROLLBACK
+2026-09-01 14:29:00,677 - backend.main - INFO - OPTIONS /api/v1/characters/
+2026-09-01 14:29:00,678 - app.request - INFO - OPTIONS /api/v1/characters/ 401 0.00ms
+2026-09-01 14:29:00,679 - backend.main - INFO -     401 (0.002s)
+2026-09-01 14:29:12,415 - backend.main - INFO - OPTIONS /api/v1/characters/
+2026-09-01 14:29:12,416 - app.request - INFO - OPTIONS /api/v1/characters/ 401 0.00ms
+2026-09-01 14:29:12,417 - backend.main - INFO -     401 (0.002s)

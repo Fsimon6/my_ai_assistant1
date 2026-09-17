@@ -1,0 +1,1 @@
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like '*spawn_main*' } | ForEach-Object { 'PID=' + $_.ProcessId + ' PPID=' + $_.ParentProcessId + ' EXE=' + $_.ExecutablePath }

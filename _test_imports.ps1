@@ -1,0 +1,5 @@
+$venv = "C:\Users\Administrator\Desktop\my_ai_assistant\backend\.venv\Scripts\python.exe"
+Write-Host "=== test unstructured md import ==="
+& $venv -c "import unstructured; from unstructured.partition.md import partition_md; print('unstructured md OK', unstructured.__version__)"
+Write-Host "=== test docx2txt import ==="
+& $venv -c "import docx2txt; print('docx2txt OK')"

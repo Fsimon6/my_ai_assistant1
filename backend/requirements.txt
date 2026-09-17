@@ -1,0 +1,82 @@
+# ============================================================
+# 应用运行依赖（生产）
+# 仅包含应用启动链真正 import 的依赖
+# 开发/测试依赖见 requirements-dev.txt
+# ============================================================
+
+# --- Web 框架 ---
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+# pydantic 需 >=2.7.4 以兼容 langchain-classic / chromadb（不再死锁旧版）
+pydantic>=2.7.4
+pydantic-settings>=2.1.0
+python-dotenv==1.0.0
+
+# --- 数据库 / ORM ---
+SQLAlchemy==1.4.54
+alembic==1.13.1
+
+# --- 认证 / 安全 ---
+# 注意：passlib 已于第七阶段从密码哈希路径移除（security.py / init_db.py 均直接使用 bcrypt），
+# 此处不再声明 passlib，避免误导为运行依赖。
+python-jose==3.3.0
+bcrypt==4.0.1
+cryptography==46.0.3
+
+# --- HTTP 客户端（OpenAI 兼容接口调用）---
+openai
+# httpx 由 backend/services/llm_service.py 直接 import（构造 httpx.Timeout 传给 AsyncOpenAI），
+# openai 也依赖它；显式声明以保证可复现。
+httpx
+# characters API 路由（backend/api/v1/characters.py）直接 import requests（requests.Session），属运行直接依赖。
+requests
+
+# --- 向量数据库 ---
+chromadb
+# vector_service 使用 langchain_classic.vectorstores.Chroma，其在运行时 import langchain_chroma；
+# 该包并非 langchain-classic/langchain-community 的硬依赖（属可选 extra），不显式声明会导致
+# 新建 .venv 后 import backend.main 失败。发行包名即 langchain-chroma。
+langchain-chroma
+
+# --- 精确查询（Phase 2：Representation -> DuckDB -> NL2SQL）---
+duckdb
+
+# --- LangChain（仅项目真实 import 的包）---
+# langchain-classic 核心已自带 langchain-core / langchain-text-splitters / numpy 等
+langchain-classic
+# 代码直接 import：langchain_community.document_loaders / langchain_community.embeddings
+langchain-community
+# Docx2txtLoader 依赖（document_service 使用其解析 .docx）；纯 Python，无 torch/PyMuPDF
+docx2txt
+# 代码直接 import：langchain_text_splitters.RecursiveCharacterTextSplitter
+langchain-text-splitters
+
+# --- Markdown 加载（document_service 使用 UnstructuredMarkdownLoader 处理 .md/.markdown）---
+unstructured
+# UnstructuredMarkdownLoader 的 .md 分区器在运行时 import markdown 包，需显式声明
+markdown
+
+# --- 表格解析（第33阶段 Table RAG：.xlsx/.xls/.csv/.tsv）---
+# excel-parser 官方 Requires-Python >=3.10（实测 3.10.11 正常 import + 解析），
+# 安装时无需 --ignore-requires-python。
+# 该包未发布到 PyPI，只能从 Git 安装；固定 commit 以保证可复现：
+excel-parser @ git+https://github.com/knowledgestack/excel-parser.git@e513763cc359d91c7ad511ca2659acbb60593d10
+# 其运行依赖（openpyxl/lxml/pydantic/tiktoken/xlrd/xxhash）会一并拉取；.xls 支持依赖 xlrd。
+# 注意：venv 的 pyvenv.cfg 为 include-system-site-packages=false，
+# 若用 `uvicorn ...`（会 re-exec 到系统 Python）启动，worker 看不到 venv 内包；
+# 请始终用 venv Python 直接启动：backend\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload
+# （本机已将 excel-parser 同时装到 venv 与系统 Python 3.10 两处 site-packages，双保险）。
+
+# ============================================================
+# 已确认不列入运行依赖的项及理由：
+# 1. torch / sentence-transformers / numpy(显式)
+#    - 仅 backend/embeddings/local_embeddings.py（LocalEmbeddings，sentence_transformers）
+#      与 vector_service 回退路径（HuggingFaceEmbeddings）使用；
+#      该 embeddings 包不在启动链顶层 import（main.py 仅惰性 import vector_service，
+#      且在 lifespan 内），故 import backend.main / uvicorn 启动不触发 torch。
+#    - 用户明确不需要 PyTorch；如需启用本地嵌入，再按需安装：
+#        pip install torch sentence-transformers   （GPU 版从 pytorch CUDA 源）
+# 2. PyMuPDF(fitz) / Pillow(PIL) / pytesseract / pandas / python-docx / chardet
+#    - 仅被未接入启动链的 backend/document_loaders/ 引用；当前运行不需要。
+# ============================================================
