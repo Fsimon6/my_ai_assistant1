@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
@@ -11,6 +11,7 @@ from backend.services.rag_service import get_rag_service
 from backend.services.document_service import save_uploaded_file
 from backend.utils.auth import get_current_active_user
 from backend.models.user import User
+from backend.services.conversation_service import conversation_service
 
 
 router = APIRouter(prefix='/api/v1/rag', tags=['RAG'])
@@ -40,6 +41,7 @@ class QueryWithHistoryRequest(BaseModel):
 async def upload_document(
     file: UploadFile = File(...),
     metadata: Optional[str] = None,
+    embedding_model: Optional[str] = Form(None),
     current_user: User = Depends(get_current_active_user)
 ):
     """上传并处理文档（需登录；文档归属当前用户）"""
@@ -81,7 +83,8 @@ async def upload_document(
             parsed_metadata,
             user_id=current_user.id,
             original_filename=original_filename,
-            file_size=file_size
+            file_size=file_size,
+            embedding_model=embedding_model
         )
 
         if result['success']:
@@ -127,6 +130,17 @@ async def query_document(
                 raise HTTPException(status_code=404, detail='角色不存在')
             char_model = character.model
             char_api_key = character.api_key
+            char_embedding_model = character.embedding_model
+
+        # 对话历史持久化（仅在有 character_id 的聊天上下文；P3 修复）
+        conv_id = None
+        if req.character_id:
+            try:
+                conv_id = conversation_service.get_or_create_conversation_id(
+                    current_user.id, int(req.character_id))
+                conversation_service.append_message(conv_id, 'user', req.query)
+            except Exception as e:
+                logger.warning(f'保存 RAG 用户消息失败：{e}')
 
         if req.stream:
             async def generate():
@@ -138,7 +152,8 @@ async def query_document(
                     user_id=current_user.id,
                     model=char_model,
                     api_key=char_api_key,
-                    document_id=req.document_id
+                    document_id=req.document_id,
+                    embedding_model=char_embedding_model,
                 ):
                     full_response += chunk
                     yield json.dumps({
@@ -146,6 +161,13 @@ async def query_document(
                         'content': chunk,
                         'timestamp': datetime.now().isoformat()
                     }) + '\n'
+
+                # P3: 流式完成后保存完整 assistant 消息
+                if conv_id is not None:
+                    try:
+                        conversation_service.append_message(conv_id, 'assistant', full_response)
+                    except Exception as e:
+                        logger.warning(f'保存 RAG 助手消息失败：{e}')
 
                 # 与普通 Chat 流式协议保持一致：末尾补 complete 帧
                 yield json.dumps({
@@ -171,9 +193,17 @@ async def query_document(
                 user_id=current_user.id,
                 model=char_model,
                 api_key=char_api_key,
-                document_id=req.document_id
+                document_id=req.document_id,
+                embedding_model=char_embedding_model,
             ):
                 response_text += chunk
+
+            # P3: 保存 assistant 消息
+            if conv_id is not None:
+                try:
+                    conversation_service.append_message(conv_id, 'assistant', response_text)
+                except Exception as e:
+                    logger.warning(f'保存 RAG 助手消息失败：{e}')
 
             return {
                 'success': True,
@@ -210,6 +240,17 @@ async def query_with_history(
                 raise HTTPException(status_code=404, detail='角色不存在')
             char_model = character.model
             char_api_key = character.api_key
+            char_embedding_model = character.embedding_model
+
+        # 对话历史持久化（仅在有 character_id 的聊天上下文；P3 修复）
+        conv_id = None
+        if req.character_id:
+            try:
+                conv_id = conversation_service.get_or_create_conversation_id(
+                    current_user.id, int(req.character_id))
+                conversation_service.append_message(conv_id, 'user', req.query)
+            except Exception as e:
+                logger.warning(f'保存 RAG 用户消息失败：{e}')
 
         if req.stream:
             async def generate():
@@ -221,7 +262,8 @@ async def query_with_history(
                     user_id=current_user.id,
                     model=char_model,
                     api_key=char_api_key,
-                    document_id=req.document_id
+                    document_id=req.document_id,
+                    embedding_model=char_embedding_model,
                 ):
                     full_response += chunk
                     yield json.dumps({
@@ -229,6 +271,13 @@ async def query_with_history(
                         'content': chunk,
                         'timestamp': datetime.now().isoformat()
                     }) + '\n'
+
+                # P3: 流式完成后保存完整 assistant 消息
+                if conv_id is not None:
+                    try:
+                        conversation_service.append_message(conv_id, 'assistant', full_response)
+                    except Exception as e:
+                        logger.warning(f'保存 RAG 助手消息失败：{e}')
 
                 # 与普通 Chat 流式协议保持一致：末尾补 complete 帧（携带完整内容）
                 yield json.dumps({
@@ -254,9 +303,17 @@ async def query_with_history(
                 user_id=current_user.id,
                 model=char_model,
                 api_key=char_api_key,
-                document_id=req.document_id
+                document_id=req.document_id,
+                embedding_model=char_embedding_model,
             ):
                 response_text += chunk
+
+            # P3: 保存 assistant 消息
+            if conv_id is not None:
+                try:
+                    conversation_service.append_message(conv_id, 'assistant', response_text)
+                except Exception as e:
+                    logger.warning(f'保存 RAG 助手消息失败：{e}')
 
             return {
                 'success': True,

@@ -40,26 +40,26 @@ class AIAssistantEmbeddings(Embeddings):
       避免把无有效向量的文档写入 Chroma。
     """
 
-    def __init__(self):
+    def __init__(self, embedding_model: str = None):
         self.llm = get_llm()
-        self.embedding_model = settings.EMBEDDING_MODEL
+        self.embedding_model = embedding_model or settings.EMBEDDING_MODEL
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+    def embed_documents(self, texts: List[str], model: str = None) -> List[List[float]]:
         """嵌入文档列表；失败抛出 EmbeddingError，禁止空向量写入。"""
         try:
             vectors = _run_async(
-                self.llm.generate_embeddings(texts, model=self.embedding_model)
+                self.llm.generate_embeddings(texts, model=model or self.embedding_model)
             )
         except Exception as e:
             raise EmbeddingError(f'远程 embedding 调用失败：{e}') from e
         self._validate_vectors(vectors, expected=len(texts))
         return vectors
 
-    def embed_query(self, text: str) -> list[float]:
+    def embed_query(self, text: str, model: str = None) -> list[float]:
         """嵌入查询；失败抛出 EmbeddingError。"""
         try:
             vectors = _run_async(
-                self.llm.generate_embeddings([text], model=self.embedding_model)
+                self.llm.generate_embeddings([text], model=model or self.embedding_model)
             )
         except Exception as e:
             raise EmbeddingError(f'远程 embedding 调用失败：{e}') from e
@@ -99,10 +99,13 @@ class VectorStoreManager:
         self,
         documents: List[Dict[str, Any]],
         collection_name: str = 'ai_assistant_docs',
+        embedding_model: str = None,
     ) -> List[str]:
         """添加文档到向量数据库（复用单例 Chroma 客户端，避免每次上传重建客户端导致
         查询/删除状态不一致）"""
         try:
+            # 按当前请求的向量模型设置 embedding（未指定则回退系统默认）
+            self.embeddings.embedding_model = embedding_model or settings.EMBEDDING_MODEL
             # 提取内容和元数据
             contents = [doc['content'] for doc in documents]
             metadatas = [doc['metadata'] for doc in documents]
@@ -128,9 +131,12 @@ class VectorStoreManager:
         query_embedding=None,
         k: int = 5,
         filter_dict: Optional[Dict] = None,
+        embedding_model: str = None,
     ) -> List[SearchResult]:
         """相似度搜索"""
         try:
+            # 按当前请求的向量模型设置 embedding（未指定则回退系统默认）
+            self.embeddings.embedding_model = embedding_model or settings.EMBEDDING_MODEL
             # 执行搜索
             results = self.vector_store.similarity_search_with_relevance_scores(
                 query=query,

@@ -42,6 +42,7 @@ class CharacterService:
             system_prompt: str,
             model: str = 'gpt-3.5-turbo',
             api_key: Optional[str] = None,
+            embedding_model: Optional[str] = None,
             advanced: bool = False,
             role: str = 'assistant',
             user_id: Optional[int] = None,
@@ -55,6 +56,7 @@ class CharacterService:
                 model=model,
                 role_type=role,
                 api_key=api_key,
+                embedding_model=embedding_model,
                 user_id=user_id,
             )
             db.add(character)
@@ -99,6 +101,7 @@ class CharacterService:
             system_prompt: Optional[str] = None,
             model: Optional[str] = None,
             api_key: Optional[str] = None,
+            embedding_model: Optional[str] = None,
             user_id: Optional[int] = None,
     ) -> Dict:
         """更新角色（数据库）"""
@@ -122,6 +125,8 @@ class CharacterService:
                 character.model = model
             if api_key is not None:
                 character.api_key = api_key
+            if embedding_model is not None:
+                character.embedding_model = embedding_model
 
             db.commit()
             db.refresh(character)
@@ -177,6 +182,7 @@ class CharacterService:
                     'name': character.name,
                     'system_prompt': sp[:100] + '...' if len(sp) > 100 else sp,
                     'model': character.model,
+                    'embedding_model': character.embedding_model,
                     'conversation_count': character.total_conversations or 0,
                     'type': 'AICharacter',
                     'created_at': character.created_at.isoformat() if character.created_at else None,

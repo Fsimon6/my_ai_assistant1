@@ -63,7 +63,8 @@ class RagService:
         metadata: Optional[Dict[str, Any]] = None,
         user_id: Optional[int] = None,
         original_filename: Optional[str] = None,
-        file_size: int = 0
+        file_size: int = 0,
+        embedding_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """处理并存储文档（优化缓存清理）
 
@@ -76,7 +77,7 @@ class RagService:
             ext = Path(file_path).suffix.lower()
             if ext in TABLE_EXTENSIONS:
                 return await self._process_and_store_table(
-                    file_path, metadata, user_id, original_filename, file_size
+                    file_path, metadata, user_id, original_filename, file_size, embedding_model
                 )
 
             # 处理文档（文本）
@@ -108,7 +109,7 @@ class RagService:
                 chunk['id'] = f'{document_id}_{chunk_index}'
 
             # 存储到向量数据库
-            ids = await self.vector_store.add_documents(chunks)
+            ids = await self.vector_store.add_documents(chunks, embedding_model=embedding_model)
 
             # 清理与新文档可能相关的缓存
             filename = os.path.basename(file_path)
@@ -149,6 +150,7 @@ class RagService:
         user_id: Optional[int] = None,
         original_filename: Optional[str] = None,
         file_size: int = 0,
+        embedding_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """表格文档专用处理：解析 -> Unified Representation -> Table Chunks -> Chroma。
 
@@ -180,7 +182,7 @@ class RagService:
                 if user_id is not None:
                     chunk['metadata']['user_id'] = user_id
 
-            ids = await self.vector_store.add_documents(chunks)
+            ids = await self.vector_store.add_documents(chunks, embedding_model=embedding_model)
 
             try:
                 await self._clear_related_cache(Path(original_path).name, chunks)
@@ -310,6 +312,7 @@ class RagService:
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         document_id: Optional[str] = None,
+        embedding_model: Optional[str] = None,
     ) -> AsyncIterator[str]:
         """RAG查询（集成缓存优化）
 
@@ -351,6 +354,7 @@ class RagService:
                 k=context_count,
                 filter_dict=filter_dict,
                 user_id=user_id,
+                embedding_model=embedding_model,
             )
 
             # 结构化表格访问结果：由程序直接输出（大数据不被 max_tokens 截断），lookup 交 LLM 叙述
@@ -848,6 +852,7 @@ class RagService:
         k: int,
         filter_dict: Optional[Dict[str, Any]],
         user_id: Optional[int],
+        embedding_model: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """语义检索 + Table-aware 扩展（共用入口，rag_query 与 query_with_history 均经此）。
 
@@ -856,7 +861,7 @@ class RagService:
         从 Structured Representation 精确读取，保证不丢行/不丢列/按原始顺序，与 row_group 数量无关；
         rep 缺失时退回完整 row_group（不再截断）。
         """
-        search_results = await self.vector_store.search(query=query, k=k, filter_dict=filter_dict)
+        search_results = await self.vector_store.search(query=query, k=k, filter_dict=filter_dict, embedding_model=embedding_model)
         # 统一结构化访问意图识别：全量枚举 / 前N / 后N / 中间范围 / 精确值查找
         intent = self._detect_structured_intent(query)
         if intent is None:
@@ -1029,6 +1034,7 @@ class RagService:
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         document_id: Optional[str] = None,
+        embedding_model: Optional[str] = None,
     ) -> AsyncIterator[str]:
         """带历史记录的查询（按归属用户过滤向量检索）
 
@@ -1059,6 +1065,7 @@ class RagService:
                 k=context_count,
                 filter_dict=filter_dict,
                 user_id=user_id,
+                embedding_model=embedding_model,
             )
 
             # 结构化表格访问结果：由程序直接输出（大数据不被 max_tokens 截断），lookup 交 LLM 叙述

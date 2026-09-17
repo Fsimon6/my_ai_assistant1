@@ -163,6 +163,19 @@
             如果不填写，将使用系统默认的API密钥
           </div>
         </el-form-item>
+
+        <el-form-item label="向量模型" prop="embedding_model">
+          <el-input
+            v-model="createForm.embedding_model"
+            placeholder="可选，留空则用系统默认 Embedding 模型；可填写如 text-embedding-3-small"
+            clearable
+            maxlength="100"
+          />
+          <div class="form-tip">
+            <el-icon><InfoFilled /></el-icon>
+            用于知识库向量化与检索；留空则使用系统默认向量模型
+          </div>
+        </el-form-item>
       </el-form>
 
       <template #footer>
@@ -208,7 +221,8 @@ const createForm = ref<CharacterCreate>({
   name: '',
   system_prompt: '',
   model: '',
-  api_key: ''
+  api_key: '',
+  embedding_model: ''
 })
 
 // 表单验证规则

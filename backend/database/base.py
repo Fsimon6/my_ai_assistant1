@@ -84,4 +84,31 @@ def init_db():
     print(' 初始化数据库表...')
 
     Base.metadata.create_all(bind=engine)
+    # create_all 不会为已存在的表 ALTER 新增列，这里做幂等增量迁移
+    _migrate_columns(engine)
     print(' 数据库表创建完成')
+
+
+def _migrate_columns(engine) -> None:
+    """为已存在的表补充新增列（增量迁移；create_all 仅建表不 ALTER）。
+
+    仅用于本项目新增可选配置列（如 AICharacter.embedding_model），
+    对所有环境幂等：列已存在则跳过，迁移失败不影响启动。
+    """
+    from sqlalchemy import inspect, text
+    try:
+        inspector = inspect(engine)
+        if not inspector.has_table('ai_characters'):
+            return
+        existing = {c['name'] for c in inspector.get_columns('ai_characters')}
+        # (列名, 类型) —— 与 backend.models.character.AICharacter 新增列保持一致
+        expected = {
+            'embedding_model': 'VARCHAR(100)',
+        }
+        with engine.begin() as conn:
+            for col, coltype in expected.items():
+                if col not in existing:
+                    conn.execute(text(f'ALTER TABLE ai_characters ADD COLUMN {col} {coltype}'))
+                    print(f'  增量迁移：ai_characters 新增列 {col}')
+    except Exception as e:  # 迁移失败不应阻断启动
+        print(f'  增量迁移跳过（不影响启动）：{e}')

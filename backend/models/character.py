@@ -20,6 +20,7 @@ class AICharacter(Base):
 
     # API配置
     api_key = Column(String(255))
+    embedding_model = Column(String(100), nullable=True, comment='向量模型（Embedding 模型名，留空则用系统默认）')
     api_provider = Column(String(50), default='openai')
 
     # 配置选项

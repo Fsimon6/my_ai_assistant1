@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from backend.utils.auth import get_current_active_user
 from backend.models.user import User
 from backend.services.table_qa_service import TableQAService
+from backend.services.conversation_service import conversation_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/table-qa", tags=["TableQA"])
@@ -32,6 +33,7 @@ class TableQARequest(BaseModel):
     document_id: Optional[str] = None   # 可选：限定单文档（Phase 1/2 均按用户隔离）
     stream: bool = False
     history: List[dict] = []            # 多轮上下文（仅 Phase 1 使用；Phase 2 无状态）
+    character_id: Optional[str] = None  # 可选：传入则把问答存入该角色的对话历史（复用现有 Conversation/Message，不新建独立历史）
 
 
 @router.post("/query")
@@ -45,15 +47,37 @@ async def table_qa_query(
     PRECISE_QUERY / AMBIGUOUS / UNSUPPORTED，并路由到 Phase 1 或 Phase 2。
     """
     try:
+        # P3: 若传入 character_id，把问答存入该角色的现有对话历史（复用 Conversation/Message，不新建独立历史）
+        conv_id = None
+        if req.character_id:
+            try:
+                conv_id = conversation_service.get_or_create_conversation_id(
+                    current_user.id, int(req.character_id))
+                conversation_service.append_message(conv_id, 'user', req.query)
+            except Exception as e:
+                logger.warning(f'保存 Table QA 用户消息失败：{e}')
+
         if req.stream:
             async def generate():
+                full_response = ''
                 async for frame in _service.stream(
                     user_id=current_user.id,
                     question=req.query,
                     document_id=req.document_id,
                     history=req.history,
                 ):
+                    try:
+                        data = json.loads(frame)
+                        if data.get('type') == 'chunk':
+                            full_response += data.get('content', '')
+                    except Exception:
+                        pass
                     yield frame
+                if conv_id is not None:
+                    try:
+                        conversation_service.append_message(conv_id, 'assistant', full_response)
+                    except Exception as e:
+                        logger.warning(f'保存 Table QA 助手消息失败：{e}')
             return StreamingResponse(
                 generate(),
                 media_type="application/x-ndjson",
@@ -66,6 +90,11 @@ async def table_qa_query(
             document_id=req.document_id,
             history=req.history,
         )
+        if conv_id is not None:
+            try:
+                conversation_service.append_message(conv_id, 'assistant', result.get('answer', ''))
+            except Exception as e:
+                logger.warning(f'保存 Table QA 助手消息失败：{e}')
         return {
             "success": True,
             **result,

@@ -11,6 +11,7 @@ class CharacterBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=50, description='角色名称')
     system_prompt: str = Field(..., min_length=1, max_length=1000, description='系统提示词')
     model: Optional[str] = Field(None, description='使用的大模型（留空则使用系统默认模型）')
+    embedding_model: Optional[str] = Field(None, description='向量模型（Embedding 模型名，留空则使用系统默认模型）')
 
 
 class CharacterCreate(CharacterBase):
@@ -39,6 +40,7 @@ class CharacterUpdate(BaseModel):
     system_prompt: Optional[str] = Field(None, min_length=1, max_length=1000, description='系统提示词')
     model: Optional[str] = Field(None, description='使用的大模型')
     api_key: Optional[str] = Field(None, description='API密钥')
+    embedding_model: Optional[str] = Field(None, description='向量模型')
 
     @validator('api_key')
     def validate_api_key(cls, v):
