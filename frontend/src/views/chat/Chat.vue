@@ -31,12 +31,6 @@
           </el-icon>
           导出
         </el-button>
-        <el-button type="text" @click="showKnowledgeBase">
-          <el-icon>
-            <Folder/>
-          </el-icon>
-          知识库
-        </el-button>
         <el-dropdown @command="handleToolCommand">
           <el-button type="text">
             <el-icon>

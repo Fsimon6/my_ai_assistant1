@@ -49,3 +49,10 @@ Desktop.ini
 .stage1_venv/
 *.xlsx
 *.xls
+
+# 诊断/排障临时产物（agent 运行日志与脚本，不进版本控制）
+*.err
+*.out
+_nav_html.txt
+_*.py
+_*.ps1
