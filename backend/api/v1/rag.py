@@ -121,8 +121,10 @@ async def query_document(
     try:
         rag_service = get_rag_service()
 
-        # 解析角色级模型（可选）：传入 character_id 时按归属用户取出 model+api_key 覆盖全局默认
-        char_model, char_api_key = None, None
+        # 解析角色级模型（可选）：传入 character_id 时按归属用户取出 model+api_key+embedding_model 覆盖全局默认
+        # 注意：char_embedding_model 必须在此处初始化为 None，否则未传 character_id 时
+        # 下方无条件引用会触发 UnboundLocalError（导致 /rag/query 与 /rag/query-with-history 直接 500）。
+        char_model, char_api_key, char_embedding_model = None, None, None
         if req.character_id:
             from backend.services.character_service import character_service
             character = character_service.get_character(req.character_id, current_user.id)
@@ -231,8 +233,10 @@ async def query_with_history(
     try:
         rag_service = get_rag_service()
 
-        # 解析角色级模型（可选）：传入 character_id 时按归属用户取出 model+api_key 覆盖全局默认
-        char_model, char_api_key = None, None
+        # 解析角色级模型（可选）：传入 character_id 时按归属用户取出 model+api_key+embedding_model 覆盖全局默认
+        # 注意：char_embedding_model 必须在此处初始化为 None，否则未传 character_id 时
+        # 下方无条件引用会触发 UnboundLocalError（导致 /rag/query 与 /rag/query-with-history 直接 500）。
+        char_model, char_api_key, char_embedding_model = None, None, None
         if req.character_id:
             from backend.services.character_service import character_service
             character = character_service.get_character(req.character_id, current_user.id)
