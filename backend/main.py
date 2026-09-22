@@ -29,6 +29,25 @@ from backend.utils.auth import get_current_active_user
 from backend.models.user import User
 from backend.utils.exceptions import global_exception_handler
 
+
+class TrailingSlashFix:
+    """原生 ASGI 中间件：在请求进入路由前，把 `/api/v1/characters`（无尾斜杠）重写为
+    `/api/v1/characters/`，避免 Starlette 对该路径返回 307 重定向、进而导致客户端（含
+    OpenAPI Try-It-Out、外部 API 调用）在重定向时丢掉 Authorization 头、二次请求被鉴权中间件
+    判为 “Missing or invalid token” → 401。
+
+    注意：BaseHTTPMiddleware 中改写 request.scope['path'] 不会传播到下游路由（Starlette 已知坑），
+    因此必须用原生 ASGI 中间件直接修改 scope 后交给 self.app。业务路由无需改动。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path") == "/api/v1/characters":
+            scope["path"] = "/api/v1/characters/"
+        await self.app(scope, receive, send)
+
 # 添加项目根目录到Python路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)     # backend的父目录
@@ -117,6 +136,9 @@ app.add_middleware(
         "/api/v1/auth/login", "/api/v1/auth/register"
     ]
 )
+
+# 尾斜杠归一化（原生 ASGI 中间件，先于路由执行）：消除 /api/v1/characters 无尾斜杠的 307 丢头问题
+app.add_middleware(TrailingSlashFix)
 app.add_middleware(LoggingMiddleware)
 
 
