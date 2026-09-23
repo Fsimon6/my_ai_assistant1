@@ -9,6 +9,7 @@ const Dashboard = () => import('@/views/dashboard/Dashboard.vue')
 const Characters = () => import('@/views/characters/Characters.vue')
 const CharacterDetail = () => import('@/views/characters/CharacterDetail.vue')
 const Chat = () => import('@/views/chat/Chat.vue')
+const TableQA = () => import('@/views/tableqa/TableQA.vue')
 const HomeView = () => import('@/views/HomeView.vue')
 
 
@@ -87,6 +88,16 @@ const routes: Array<RouteRecordRaw> = [
       requiresAuth: true,
       showLayout: true,
       title: '知识库管理',
+    }
+  },
+  {
+    path: '/table-qa',
+    name: 'TableQA',
+    component: TableQA,
+    meta: {
+      requiresAuth: true,
+      showLayout: true,
+      title: '表格问答',
     }
   },
   // 聊天必须基于某个角色：裸 /chat 重定向到角色列表（避免落入 404→/login→/dashboard 链路）

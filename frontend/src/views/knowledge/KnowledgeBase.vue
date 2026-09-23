@@ -310,7 +310,30 @@ const previewVisible = ref(false)
 const previewDoc = ref<any>(null)
 const previewChunks = ref<any[]>([])
 const previewLoading = ref(false)
-const tableStructure = ref<any>(null)
+// 表格结构（对应后端 get_table_structure 返回：{ structure: { workbook: { sheets: [...] } } }）
+interface TableColumn {
+  col_letter: string
+  technical_name: string
+}
+interface TableInfo {
+  table_id: string
+  range: string
+  col_count: number
+  row_count: number
+  n_header_rows: number
+  columns: TableColumn[]
+}
+interface SheetInfo {
+  sheet_name: string
+  tables: TableInfo[]
+}
+interface WorkbookInfo {
+  sheets: SheetInfo[]
+}
+interface TableStructure {
+  workbook: WorkbookInfo
+}
+const tableStructure = ref<TableStructure | null>(null)
 
 // 按文档查询（限定只在该文档内检索）
 const queryVisible = ref(false)

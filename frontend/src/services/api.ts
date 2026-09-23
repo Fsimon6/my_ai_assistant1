@@ -126,6 +126,47 @@ export const ragApi = {
   }
 }
 
+// Table QA 接口返回结构（响应拦截器已解包为 response.data）
+export interface TableQAResult {
+  success?: boolean | string
+  route?: string
+  intent?: string
+  confidence?: string
+  reason?: string
+  execute?: boolean
+  chain?: string
+  answer?: string
+  sql?: string
+  match_mode?: string
+  columns?: string[]
+  rows?: any[][]
+  explanation?: string
+  sources?: any[]
+  error_type?: string
+  message?: string
+  timestamp?: string
+  [key: string]: any
+}
+
+// Table QA API（Phase 3 统一入口：POST /table-qa/query，需登录；与 ragApi 风格一致）
+export const tableQaApi = {
+  // 表格问答查询（非流式；documentId 可选限定单文档，history 可选多轮上下文）
+  query: async (
+    query: string,
+    documentId?: string,
+    stream: boolean = false,
+    history: any[] = []
+  ): Promise<TableQAResult> => {
+    const res = await api.post('/table-qa/query', {
+      query,
+      document_id: documentId,
+      stream,
+      history
+    })
+    return res as unknown as TableQAResult
+  }
+}
+
 // Characters API
 export const charactersApi = {
   // 与角色对话
