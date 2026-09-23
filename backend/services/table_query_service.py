@@ -364,6 +364,48 @@ def validate_sql(sql: str, allowed: List[str]) -> None:
             raise ValueError(f"引用了不允许的表: {m}")
 
 
+# ----------------------------- 查询范围 / 来源推导（保证一致） -----------------------------
+def _parse_referenced_tables(sql: str, allowed: List[str]) -> List[str]:
+    """提取 SQL 实际引用的、且属于 allowed 白名单的表名（t_<hex>_<idx>）。
+
+    这是“实际查询范围”的唯一事实来源：sources 与 answer 必须与之完全一致，
+    杜绝“SQL 只查一张表、sources 却报全部表”的不一致。
+    """
+    found = re.findall(r"\b(t_[a-f0-9]+_\d+)\b", sql.lower())
+    seen: List[str] = []
+    for t in found:
+        if t in allowed and t not in seen:
+            seen.append(t)
+    return seen
+
+
+def _parse_referenced_columns(sql: str) -> List[str]:
+    """提取 SQL 中以双引号包裹的业务列名（排除 __ 源列）。"""
+    cols = re.findall(r'"([^"]+)"', sql)
+    return [c for c in cols if not c.startswith(SRC_PREFIX)]
+
+
+def _rewrite_cross_table(sql: str, t0: str, compatible: List[str]) -> Optional[str]:
+    """将单表查询改写为对 compatible 表的 UNION ALL 派生表。
+
+    仅当 SQL 仅 FROM 一个表、且显式引用了业务列时适用；用于 document_id=None
+    （或单文档多表）下对“结构兼容且语义相同”的多个表做统一聚合/筛选。
+    返回改写后的 SQL；无法安全改写则返回 None（回退为单表）。
+    """
+    pat = re.compile(r"\bFROM\s+" + re.escape(t0) + r"\b", re.IGNORECASE)
+    if not pat.search(sql):
+        return None
+    ref_cols = _parse_referenced_columns(sql)
+    if not ref_cols:
+        # 未显式引用业务列（如纯 COUNT(*)/SELECT *）：不强行跨表，保持单表，避免语义漂移
+        return None
+    proj = ", ".join(_quote_ident(c) for c in ref_cols)
+    subs = " UNION ALL ".join(
+        f"(SELECT {proj} FROM {_quote_ident(t)})" for t in compatible
+    )
+    return pat.sub(f"FROM ({subs}) AS __u", sql, count=1)
+
+
 # ----------------------------- 受控值匹配兜底（精确优先） -----------------------------
 def _rewrite_eq(sql: str, mode: str) -> str:
     """仅对 "col" = 'val' 形式的字符串等值条件做改写。数值等值不受影响。"""
@@ -495,7 +537,7 @@ class TableQueryService:
                 pass
         return cols, rows, "exact-not-found"
 
-    def _derive_sources(self, allowed: List[str], cols: List[str], rows: List[tuple]) -> List[Dict[str, Any]]:
+    def _derive_sources(self, queried: List[str], cols: List[str], rows: List[tuple]) -> List[Dict[str, Any]]:
         idx = {c: i for i, c in enumerate(cols)}
         if "__filename" in idx and rows:
             seen = set()
@@ -513,13 +555,15 @@ class TableQueryService:
                         "range": r[idx.get("__range")],
                     })
             return out[:50]
+        # 仅返回“实际被查询到的表”，绝不过度上报为当前用户的全部表
         out = []
-        for t in allowed:
+        for t in queried:
             m = self.engine.table_meta.get(t)
             if m:
                 out.append({
                     "document_id": m["document_id"], "filename": m["filename"],
                     "sheet_name": m["sheet_name"],
+                    "table_id": None, "range": None, "row_index": None,
                 })
         return out
 
@@ -537,6 +581,26 @@ class TableQueryService:
                       if self.engine.table_meta.get(t, {}).get("document_id") == document_id]
         return tables
 
+    def _compatible_tables(self, allowed: List[str], ref_cols: List[str]) -> List[str]:
+        """在 allowed 中筛选：同时包含全部 ref_cols 且这些列类型一致的表（UNION 兼容）。
+
+        document_id=None（或全部表>1）时，仅把“结构兼容、语义相同”的表并入跨表查询；
+        列缺失或类型不一致（如一张 VARCHAR、一张 DOUBLE）的表会被排除，绝不强行 UNION。
+        """
+        pairs: List[Tuple[str, Dict[str, str]]] = []
+        for t in allowed:
+            m = self.engine.table_meta.get(t)
+            if not m:
+                continue
+            cmap = {c["name"]: c["type"] for c in m["columns"]}
+            if all(col in cmap for col in ref_cols):
+                pairs.append((t, cmap))
+        if not pairs:
+            return []
+        ref_types = {col: pairs[0][1][col] for col in ref_cols}
+        return [t for t, cmap in pairs
+                if all(cmap.get(col) == ref_types[col] for col in ref_cols)]
+
     async def _pipeline(self, user_id: Any, question: str, document_id: Optional[str]):
         allowed = self._allowed(user_id, document_id)
         if not allowed:
@@ -544,8 +608,27 @@ class TableQueryService:
         schema, alias = self._build_schema_context(allowed)
         sql = await self._nl2sql(question, schema, alias, allowed)
         validate_sql(sql, allowed)
+
+        # 以“SQL 实际引用的表”作为查询范围事实来源（杜绝 sources 过度上报）
+        ref_tables = _parse_referenced_tables(sql, allowed)
+        queried = list(ref_tables) or list(allowed)
+
+        ref_cols = _parse_referenced_columns(sql)
+        # document_id=None（或全部兼容表 >1）时：若 LLM 仅引用单表、但存在结构兼容的同语义表，
+        # 改写为 UNION ALL，使“实际 SQL = 查询范围 = sources = answer 语义”四者完全一致；
+        # 若仅单表可用或不兼容，则保持单表，sources 只报实际查询到的那张表。
+        if len(ref_tables) == 1 and ref_cols:
+            compatible = self._compatible_tables(allowed, ref_cols)
+            if len(compatible) > 1:
+                t0 = ref_tables[0]
+                rewritten = _rewrite_cross_table(sql, t0, compatible)
+                if rewritten is not None:
+                    validate_sql(rewritten, allowed)  # 二次安全校验：仅引用 allowed 内表
+                    sql = rewritten
+                    queried = list(compatible)
+
         cols, rows, match_mode = self._execute_with_fallback(sql)
-        sources = self._derive_sources(allowed, cols, rows)
+        sources = self._derive_sources(queried, cols, rows)
         return sql, cols, rows, match_mode, sources
 
     # ---- 解释 ----
