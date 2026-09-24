@@ -155,20 +155,33 @@ class RagService:
         """表格文档专用处理：解析 -> Unified Representation -> Table Chunks -> Chroma。
 
         保留原始文件（§18），解析后做丢列校验（§21），校验失败不上 Chroma。
+
+        失败回滚（杜绝“Representation 已保存、Chroma/Embedding 失败”的孤儿）：
+        - 任一步骤失败，仅清理“本次上传 document_id”对应的 Representation JSON 与原始表文件，
+          绝不删除历史 Representation / 其他文档 / 其他用户数据；
+        - 原始异常继续向上抛出，由 upload API 正确返回失败（不吞异常）。
         """
+        document_id = uuid.uuid4().hex
+        ext = Path(file_path).suffix.lower()
+        original_path: Optional[str] = None
         try:
-            document_id = uuid.uuid4().hex
-            ext = Path(file_path).suffix.lower()
+            # 实际用于本次索引的 embedding 模型（与 add_documents 保持一致），并记录进 Representation
+            effective_embedding_model = embedding_model or settings.EMBEDDING_MODEL
+
+            # 1) 搬运原始文件（move 后 file_path 不再存在，后续回滚以 original_path 为准）
             original_path = store_original(file_path, document_id)
 
+            # 2) 解析为 Unified Representation（记录本次实际 embedding 模型）
             rep = build_representation(
                 original_path, document_id, user_id,
                 original_filename or Path(original_path).name,
                 ext.lstrip('.'), original_path,
+                embedding_model=effective_embedding_model,
             )
             # §21 校验：原始列数 vs Representation 列数，防止异常 Excel 静默丢列
             validate_representation(original_path, rep)
 
+            # 3) 落盘 Representation
             save_representation_json(rep)
             processed_at = datetime.now().isoformat()
             chunks = build_table_chunks(rep, processed_at)
@@ -182,6 +195,7 @@ class RagService:
                 if user_id is not None:
                     chunk['metadata']['user_id'] = user_id
 
+            # 4) 写入 Chroma（失败则回滚本步骤之前已落盘的 Representation + 原始文件）
             ids = await self.vector_store.add_documents(chunks, embedding_model=embedding_model)
 
             try:
@@ -196,22 +210,38 @@ class RagService:
                 'chunk_ids': ids,
                 'filename': Path(original_path).name,
             }
-        except TableParseValidationError as e:
-            logger.error(f'表格解析校验失败：{e}')
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except OSError:
-                pass
-            return {'success': False, 'error': f'解析校验失败：{e}', 'filename': os.path.basename(file_path)}
         except Exception as e:
-            logger.error(f'表格文档处理失败：{e}')
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except OSError:
-                pass
-            return {'success': False, 'error': str(e), 'filename': os.path.basename(file_path)}
+            # ---- 失败回滚：仅清理本次上传 document_id 的产物，绝不波及历史/其他用户 ----
+            logger.error(f'表格文档处理失败，回滚本次产物：{e}')
+            RagService._rollback_table_upload(document_id, original_path, file_path)
+            raise  # 原始异常继续向上抛出（upload API 据此返回失败）
+
+    @staticmethod
+    def _rollback_table_upload(
+        document_id: str,
+        original_path: Optional[str],
+        file_path: str,
+    ) -> None:
+        """回滚一次表格上传产生的产物：仅限 document_id 对应的 Representation JSON 与原始表文件。
+
+        不删除历史 Representation、不删除其他文档、不删除其他用户数据。
+        store_original 已将 file_path move 到 original_path，故 file_path 已不存在（删除为 no-op）。
+        """
+        if document_id:
+            from backend.services.table_representation import table_store_dir
+            rep_path = table_store_dir() / f"{document_id}.json"
+            if rep_path.exists():
+                try:
+                    rep_path.unlink()
+                    logger.info(f'回滚：删除本次 Representation {rep_path}')
+                except OSError as oe:
+                    logger.warning(f'回滚删除 Representation 失败：{oe}')
+        for p in (original_path, file_path):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
     def get_table_structure(self, document_id: str) -> Optional[Dict[str, Any]]:
         """读取已保存的 Unified Table Representation（供前端预览 Workbook/Sheet/Columns/Rows）。"""

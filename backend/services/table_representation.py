@@ -182,6 +182,7 @@ def build_representation(
     filename: str,
     file_type: str,
     original_path: str,
+    embedding_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     grids = parse_to_grids(file_path)
     sheets_rep = []
@@ -252,6 +253,7 @@ def build_representation(
         'file_type': file_type,
         'user_id': user_id,
         'original_path': original_path,
+        'embedding_model': embedding_model,
         'generated_at': datetime.now().isoformat(),
         'workbook': {'sheets': sheets_rep},
         'source_uri_template': f"{filename}#{{sheet}}!{{range}}",
@@ -301,6 +303,7 @@ def _mk_chunk(idx, chunk_type, sheet_name, table, rep, source_uri, rstart, rend,
         'user_id': rep['user_id'],
         'filename': rep['filename'],
         'file_type': rep['file_type'],
+        'embedding_model': rep.get('embedding_model'),
         'chunk_type': chunk_type,
         'sheet_name': sheet_name,
         'table_id': table['table_id'],
