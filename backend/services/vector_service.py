@@ -106,9 +106,16 @@ class VectorStoreManager:
         try:
             # 按当前请求的向量模型设置 embedding（未指定则回退系统默认）
             self.embeddings.embedding_model = embedding_model or settings.EMBEDDING_MODEL
+            effective_model = self.embeddings.embedding_model
             # 提取内容和元数据
             contents = [doc['content'] for doc in documents]
-            metadatas = [doc['metadata'] for doc in documents]
+            # 复制 metadata，避免就地修改调用方传入的对象
+            metadatas = [dict(doc['metadata']) for doc in documents]
+            # provenance：明确区分“历史原始索引模型（embedding_model）”与
+            # “本次向量实际使用的模型（indexed_embedding_model）”，绝不伪造历史信息。
+            # 历史 embedding_model 保持原值（孤儿为 null=未知），本字段如实记录当前向量模型。
+            for m in metadatas:
+                m['indexed_embedding_model'] = effective_model
             ids = [doc['id'] for doc in documents]
 
             # 复用已有的单例客户端，向其追加文本（保持 add/query/delete 使用同一客户端）
@@ -123,6 +130,62 @@ class VectorStoreManager:
 
         except Exception as e:
             logger.error(f'添加文档到向量数据库失败：{e}')
+            raise
+
+    async def reindex_document(
+        self,
+        chunks: List[Dict[str, Any]],
+        embedding_model: str = None,
+        batch_size: int = 20,
+    ) -> List[str]:
+        """单文档重索引（补建 Chroma 向量），带文档级事务回滚。
+
+        用于把“Representation 完整、Chroma 缺失”的历史孤儿文档重新建立向量，而不触碰
+        其他文档/用户。
+
+        - 复用单例 embedding 客户端与 Chroma 客户端（不产生第二套 batch 机制）；
+        - 按 batch_size 顺序提交，每批 <=20 texts，每批独立日志；
+        - 任一批失败：删除本次已写入的、属于该 document_id 的全部 chunk ids
+          （id 形如 document_id_index，精确按 id 删除），不影响其他文档/用户；
+          原始 Representation 与原始文件不变；原始异常继续向上抛出。
+
+        调用方需保证 chunks 全部属于同一个 document_id。
+        """
+        if not chunks:
+            return []
+        # 按当前请求的向量模型设置 embedding（未指定则回退系统默认）
+        self.embeddings.embedding_model = embedding_model or settings.EMBEDDING_MODEL
+        effective_model = self.embeddings.embedding_model
+        document_id = chunks[0].get('metadata', {}).get('document_id')
+        total_batches = (len(chunks) + batch_size - 1) // batch_size
+
+        added_ids: List[str] = []
+        collection = self.vector_store._collection
+        try:
+            for start in range(0, len(chunks), batch_size):
+                batch = chunks[start:start + batch_size]
+                texts = [c['content'] for c in batch]
+                metas = [dict(c['metadata']) for c in batch]
+                # provenance：本批向量实际使用的模型（不覆盖历史 embedding_model）
+                for m in metas:
+                    m['indexed_embedding_model'] = effective_model
+                ids = [c['id'] for c in batch]
+                self.vector_store.add_texts(texts=texts, metadatas=metas, ids=ids)
+                added_ids.extend(ids)
+                logger.info(
+                    f'重索引批次 {start // batch_size + 1}/{total_batches} 完成，'
+                    f'本批大小={len(batch)}，累计={len(added_ids)}'
+                )
+            return added_ids
+        except Exception as e:
+            logger.error(f'单文档重索引失败，回滚本次写入：{e}')
+            if added_ids:
+                # 仅删除本次该 document_id 已写入的 chunk ids（id 前缀保证只命中本文档）
+                collection.delete(ids=added_ids)
+                logger.info(
+                    f'回滚删除 {len(added_ids)} 条本次写入向量（document_id={document_id}），'
+                    f'其他文档/用户不受影响'
+                )
             raise
 
     async def search(
