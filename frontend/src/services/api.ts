@@ -150,6 +150,12 @@ export interface TableQAResult {
 
 // Table QA API（Phase 3 统一入口：POST /table-qa/query，需登录；与 ragApi 风格一致）
 export const tableQaApi = {
+  // 列出当前用户可被 Table Query 实际查询的表格文档（GET /table-qa/documents，数据源=Table Representation，按 user_id 隔离）
+  getDocuments: async (): Promise<{ success?: boolean; documents?: any[] }> => {
+    const res = await api.get('/table-qa/documents')
+    return res as unknown as { success?: boolean; documents?: any[] }
+  },
+
   // 表格问答查询（非流式；documentId 可选限定单文档，history 可选多轮上下文）
   query: async (
     query: string,

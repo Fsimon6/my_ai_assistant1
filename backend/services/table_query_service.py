@@ -443,6 +443,29 @@ class TableQueryService:
                 reps.append(rep)
         return reps
 
+    def list_user_table_documents(self, user_id: Any) -> List[Dict[str, Any]]:
+        """列出当前用户可被 Table Query 实际查询的表格文档（数据源=Table Representation 文件系统）。
+
+        与 Phase 2 查询引擎（document_id=None 时的可查询集合）共用同一枚举逻辑
+        （_load_user_representations 按 user_id 过滤），确保“下拉框集合 == 实际可查询集合”，
+        不再依赖 Chroma 文档列表。只返回有效表格类型（xlsx/xls/csv/tsv），
+        按 filename 稳定排序（filename 相同再退而用 document_id）。
+        不读取其他用户数据、不修改 representation 文件、不新建数据库表。
+        """
+        valid_types = {ext.lstrip(".") for ext in TABLE_EXTENSIONS}
+        docs: List[Dict[str, Any]] = []
+        for rep in self._load_user_representations(user_id):
+            ft = (rep.get("file_type") or "").lower()
+            if ft not in valid_types:
+                continue
+            docs.append({
+                "document_id": rep.get("document_id"),
+                "filename": rep.get("filename") or rep.get("original_filename") or "未知文件",
+                "type": ft,
+            })
+        docs.sort(key=lambda d: ((d["filename"] or "").lower(), d["document_id"] or ""))
+        return docs
+
     def ensure_user_tables(self, user_id: Any) -> None:
         for rep in self._load_user_representations(user_id):
             self.engine.register_representation(rep, user_id)

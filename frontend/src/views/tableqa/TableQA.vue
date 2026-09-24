@@ -121,11 +121,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ragApi, tableQaApi, type TableQAResult } from '@/services/api'
+import { tableQaApi, type TableQAResult } from '@/services/api'
 
 const TABLE_TYPES = ['xlsx', 'xls', 'csv', 'tsv']
 
-// 文档范围（复用 ragApi.getDocuments，仅展示表格类型）
+// 文档范围（Table QA 专用数据源：GET /table-qa/documents，来自 Table Representation，按 user_id 隔离）
 const allDocuments = ref<any[]>([])
 const tableDocuments = computed(() =>
   allDocuments.value.filter((d) => TABLE_TYPES.includes((d.type || '').toLowerCase()))
@@ -181,7 +181,7 @@ const formatSource = (src: any): string => {
 
 const loadDocuments = async () => {
   try {
-    const res = await ragApi.getDocuments()
+    const res = await tableQaApi.getDocuments()
     allDocuments.value = (res.documents || []).map((d: any) => ({
       document_id: d.document_id,
       filename: d.filename,

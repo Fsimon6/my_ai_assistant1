@@ -103,3 +103,17 @@ async def table_qa_query(
     except Exception as e:  # noqa: BLE001
         logger.error(f"统一 Table QA 失败：{e}")
         raise
+
+
+@router.get("/documents")
+async def list_table_documents(
+    current_user: User = Depends(get_current_active_user),
+):
+    """列出当前用户可被 Table Query 实际查询的表格文档（用于前端“文档范围”下拉框）。
+
+    数据源=Table Representation（文件系统 table_originals/*.json），与 Phase 2 查询引擎
+    （document_id=None 时的可查询集合）共用同一枚举逻辑，按 user_id 隔离；
+    不依赖 Chroma、不读取其他用户数据、不修改 representation 文件、不新建数据库表。
+    """
+    docs = _service.tq.list_user_table_documents(current_user.id)
+    return {"success": True, "documents": docs}
