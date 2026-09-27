@@ -97,6 +97,21 @@ async def upload_document(
                 'total_chunks': result['total_chunks'],
             }
         else:
+            # 友好错误：embedding 类失败已携带 error_type/error_message，返回明确状态 + 提示
+            # （不暴露 API Key / 原始响应细节）。quota/rate-limit 用 429，服务错误用 503。
+            error_type = result.get('error_type')
+            if error_type:
+                if error_type in ('EMBEDDING_QUOTA_EXCEEDED', 'EMBEDDING_RATE_LIMITED'):
+                    status_code = 429
+                else:
+                    status_code = 503
+                raise HTTPException(
+                    status_code=status_code,
+                    detail={
+                        'error_type': error_type,
+                        'message': result.get('error_message') or '文档处理失败，请稍后重试。',
+                    },
+                )
             raise HTTPException(
                 status_code=500,
                 detail=f'文档处理失败：{result.get("error")}'

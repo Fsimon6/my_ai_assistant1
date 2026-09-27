@@ -11,7 +11,7 @@ import re
 
 from backend.config.settings import settings
 from backend.services.llm_service import get_llm, LLMFactory, LLMConfig
-from backend.services.vector_service import get_vector_store_manager
+from backend.services.vector_service import get_vector_store_manager, EmbeddingError
 from backend.services.document_service import DocumentProcessor
 from backend.services.cache_service import get_cache_service, CacheKey
 from backend.services.table_representation import (
@@ -137,6 +137,16 @@ class RagService:
                     os.remove(file_path)
             except OSError as oe:
                 logger.debug(f'清理失败临时文件出错：{file_path}, {oe}')
+            # 友好错误分类：embedding 类异常返回结构化 error_type + 用户提示，
+            # 不暴露 API Key / 原始响应细节；普通文档与 Excel 共用同一路径。
+            if isinstance(e, EmbeddingError):
+                return {
+                    'success': False,
+                    'error_type': e.error_type,
+                    'error_message': e.user_message,
+                    'error': str(e),  # 仅后端诊断用，前端不展示
+                    'filename': os.path.basename(file_path),
+                }
             return {
                 'success': False,
                 'error': str(e),

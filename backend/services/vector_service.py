@@ -17,8 +17,31 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingError(Exception):
-    """Embedding 生成失败：禁止返回空向量或静默回退。"""
-    pass
+    """Embedding 生成失败：禁止返回空向量或静默回退。
+
+    作为所有 embedding 错误的基类。子类携带友好的 error_type / user_message，
+    供 API 层映射为明确的 HTTP 状态与用户提示（不暴露 API Key / 原始响应细节）。
+    """
+    error_type: str = 'EMBEDDING_SERVICE_ERROR'
+    user_message: str = 'Embedding 服务暂时不可用，请稍后重试。'
+
+
+class EmbeddingQuotaError(EmbeddingError):
+    """额度/计费耗尽（如 429 insufficient_quota / FreeTierOnly）。"""
+    error_type = 'EMBEDDING_QUOTA_EXCEEDED'
+    user_message = 'Embedding 服务额度不足，请检查 Embedding 服务配额/计费状态。'
+
+
+class EmbeddingRateLimitError(EmbeddingError):
+    """真实限流（如 429 rate_limit_exceeded / too many requests）。"""
+    error_type = 'EMBEDDING_RATE_LIMITED'
+    user_message = 'Embedding 请求过于频繁，请稍后重试。'
+
+
+class EmbeddingServiceUnavailableError(EmbeddingError):
+    """其它 embedding 服务错误（provider 5xx / 超时 / 连接错误等）。"""
+    error_type = 'EMBEDDING_SERVICE_ERROR'
+    user_message = 'Embedding 服务暂时不可用，请稍后重试。'
 
 
 def _run_async(coro):
@@ -45,26 +68,63 @@ class AIAssistantEmbeddings(Embeddings):
         self.embedding_model = embedding_model or settings.EMBEDDING_MODEL
 
     def embed_documents(self, texts: List[str], model: str = None) -> List[List[float]]:
-        """嵌入文档列表；失败抛出 EmbeddingError，禁止空向量写入。"""
+        """嵌入文档列表；失败抛出（已分类的）EmbeddingError，禁止空向量写入。"""
         try:
             vectors = _run_async(
                 self.llm.generate_embeddings(texts, model=model or self.embedding_model)
             )
+        except EmbeddingError:
+            raise
         except Exception as e:
-            raise EmbeddingError(f'远程 embedding 调用失败：{e}') from e
+            raise self._classify_embedding_cause(e) from e
         self._validate_vectors(vectors, expected=len(texts))
         return vectors
 
     def embed_query(self, text: str, model: str = None) -> list[float]:
-        """嵌入查询；失败抛出 EmbeddingError。"""
+        """嵌入查询；失败抛出（已分类的）EmbeddingError。"""
         try:
             vectors = _run_async(
                 self.llm.generate_embeddings([text], model=model or self.embedding_model)
             )
+        except EmbeddingError:
+            raise
         except Exception as e:
-            raise EmbeddingError(f'远程 embedding 调用失败：{e}') from e
+            raise self._classify_embedding_cause(e) from e
         self._validate_vectors(vectors, expected=1)
         return vectors[0]
+
+    @staticmethod
+    def _classify_embedding_cause(exc: Exception) -> 'EmbeddingError':
+        """把底层 embedding 异常归类为友好错误类型（不暴露 API Key / 原始响应细节）。
+
+        分类依据：openai 兼容异常的 status_code / body.error.type / body.error.code / 文本。
+        - 429 + quota/billing/free-tier        -> EmbeddingQuotaError (额度/计费)
+        - 429 + rate limit / too many requests -> EmbeddingRateLimitError (限流)
+        - 其它 429                             -> EmbeddingRateLimitError (保守，不当成配额)
+        - 5xx / 超时 / 连接错误                -> EmbeddingServiceUnavailableError (服务错误)
+        """
+        status = getattr(exc, 'status_code', None)
+        body = getattr(exc, 'body', None)
+        err_obj = body.get('error', {}) if isinstance(body, dict) else {}
+        code = str(err_obj.get('code') or getattr(exc, 'code', '') or '').lower()
+        etype = str(err_obj.get('type') or '').lower()
+        text = str(exc).lower()
+
+        if status == 429 or '429' in text:
+            quota_hit = (
+                'insufficient_quota' in code or 'insufficient_quota' in etype
+                or 'allocationquota' in code or 'allocationquota' in etype
+                or 'quota' in text or 'free tier' in text or 'free quota' in text
+                or 'billing' in text
+            )
+            if quota_hit:
+                return EmbeddingQuotaError(str(exc))
+            if ('rate_limit' in code or 'rate_limit' in etype
+                    or 'rate limit' in text or 'too many requests' in text):
+                return EmbeddingRateLimitError(str(exc))
+            return EmbeddingRateLimitError(str(exc))
+
+        return EmbeddingServiceUnavailableError(str(exc))
 
     @staticmethod
     def _validate_vectors(vectors, expected: int) -> None:

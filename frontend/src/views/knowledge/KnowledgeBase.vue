@@ -460,7 +460,7 @@ const handleFileUploaded = async (fileData: any) => {
     })
 
     ElMessage.success(`文件"${fileData.name}" 上传成功`)
-  } catch (error) {
+  } catch (error: any) {
     console.error('文件上传失败：', error)
 
     uploadHistory.value.unshift({
@@ -471,7 +471,23 @@ const handleFileUploaded = async (fileData: any) => {
       timestamp: new Date().toISOString()
     })
 
-    ElMessage.error('文件上传失败')
+    // 优先使用后端返回的友好错误（detail 为 {error_type, message}），不再展示原始异常
+    const detail = error?.response?.data?.detail
+    let msg = '文件上传失败，请稍后重试'
+    if (detail && typeof detail === 'object') {
+      if (detail.error_type === 'EMBEDDING_QUOTA_EXCEEDED') {
+        msg = detail.message || 'Embedding 服务额度不足，请检查配额/计费状态。'
+      } else if (detail.error_type === 'EMBEDDING_RATE_LIMITED') {
+        msg = detail.message || 'Embedding 请求过于频繁，请稍后重试。'
+      } else if (detail.error_type === 'EMBEDDING_SERVICE_ERROR') {
+        msg = detail.message || 'Embedding 服务暂时不可用，请稍后重试。'
+      } else if (typeof detail === 'string') {
+        msg = detail
+      }
+    } else if (typeof detail === 'string') {
+      msg = detail
+    }
+    ElMessage.error(msg)
   }
 }
 
