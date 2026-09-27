@@ -304,6 +304,8 @@ const uploadHistory = ref<any[]>([])
 const searchQuery = ref('')
 const quickQuery = ref('')
 const queryResult = ref('')
+// 上传锁：上传进行中禁止重复提交，避免长耗时上传期间用户连点导致多个相同 POST /rag/upload
+const uploading = ref(false)
 
 // 文档预览（拉取该文档全部分块原文）
 const previewVisible = ref(false)
@@ -438,6 +440,9 @@ const loadCollectionInfo = async () => {
 }
 
 const handleFileUploaded = async (fileData: any) => {
+  // 上传锁：进行中忽略重复触发（如连续点击 / 多文件连发），避免重复 POST /rag/upload
+  if (uploading.value) return
+  uploading.value = true
   try {
     // 调用上传API
     const result = await ragApi.uploadDocument(fileData.file, {
@@ -488,6 +493,9 @@ const handleFileUploaded = async (fileData: any) => {
       msg = detail
     }
     ElMessage.error(msg)
+  } finally {
+    // 无论成功/失败/取消，均释放上传锁
+    uploading.value = false
   }
 }
 

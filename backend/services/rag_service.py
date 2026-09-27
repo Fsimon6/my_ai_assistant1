@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import os
+import asyncio
 import uuid
 from typing import List, Dict, Any, Optional
 from collections.abc import AsyncIterator
@@ -129,6 +130,21 @@ class RagService:
                 'filename': filename
             }
 
+        except asyncio.CancelledError:
+            # 客户端超时/用户取消/连接断开 → 任务被取消。清理半成品临时文件，并删除可能已
+            # 写入的向量（Chroma add_texts 为单批写入，取消可能发生在写入中途），绝不吞掉取消。
+            logger.error(f'文档处理被取消（CancelledError），清理临时文件：{file_path}')
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except OSError as oe:
+                logger.debug(f'清理失败临时文件出错：{file_path}, {oe}')
+            try:
+                if document_id:
+                    await self.vector_store.delete_documents([document_id], user_id=user_id)
+            except Exception as ce:
+                logger.warning(f'取消时清理向量失败（忽略）：{ce}')
+            raise
         except Exception as e:
             logger.error(f'处理存储文档失败：{e}')
             # 失败清理：embedding/向量写入失败时在成功落盘的文件即为半成品，需删除避免孤儿文件
@@ -220,10 +236,16 @@ class RagService:
                 'chunk_ids': ids,
                 'filename': Path(original_path).name,
             }
+        except asyncio.CancelledError:
+            # 客户端超时/用户取消/连接断开 → 任务被取消；必须回滚本次产物，否则遗留
+            # Representation + 原始文件（甚至 Chroma 半截向量），绝不吞掉取消。
+            logger.error(f'表格文档处理被取消（CancelledError），回滚本次产物：document_id={document_id}')
+            RagService._rollback_table_upload(document_id, original_path, file_path, user_id)
+            raise  # 原始取消继续向上抛出（由 ASGI 层正常终止请求）
         except Exception as e:
             # ---- 失败回滚：仅清理本次上传 document_id 的产物，绝不波及历史/其他用户 ----
             logger.error(f'表格文档处理失败，回滚本次产物：{e}')
-            RagService._rollback_table_upload(document_id, original_path, file_path)
+            RagService._rollback_table_upload(document_id, original_path, file_path, user_id)
             raise  # 原始异常继续向上抛出（upload API 据此返回失败）
 
     @staticmethod
@@ -231,12 +253,25 @@ class RagService:
         document_id: str,
         original_path: Optional[str],
         file_path: str,
+        user_id: Optional[int] = None,
     ) -> None:
-        """回滚一次表格上传产生的产物：仅限 document_id 对应的 Representation JSON 与原始表文件。
+        """回滚一次表格上传产生的产物：仅限 document_id 对应的 Chroma 向量、Representation JSON 与原始表文件。
 
         不删除历史 Representation、不删除其他文档、不删除其他用户数据。
+        幂等：重复调用安全（文件/向量不存在时跳过）。
+
         store_original 已将 file_path move 到 original_path，故 file_path 已不存在（删除为 no-op）。
         """
+        # 1) 删除本次 Chroma 向量（取消可能发生在 add_texts 写入中途，留下半截向量）
+        if document_id:
+            try:
+                from backend.services.vector_service import get_vector_store_manager
+                vsm = get_vector_store_manager()
+                vsm.delete_documents([document_id], user_id=user_id)
+                logger.info(f'回滚：删除本次 Chroma 向量 document_id={document_id}')
+            except Exception as ce:
+                logger.warning(f'回滚删除 Chroma 向量失败（忽略，继续清理文件）：{ce}')
+        # 2) 删除 Representation JSON
         if document_id:
             from backend.services.table_representation import table_store_dir
             rep_path = table_store_dir() / f"{document_id}.json"
@@ -246,6 +281,7 @@ class RagService:
                     logger.info(f'回滚：删除本次 Representation {rep_path}')
                 except OSError as oe:
                     logger.warning(f'回滚删除 Representation 失败：{oe}')
+        # 3) 删除原始表文件
         for p in (original_path, file_path):
             if p and os.path.exists(p):
                 try:

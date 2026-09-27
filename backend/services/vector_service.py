@@ -237,6 +237,18 @@ class VectorStoreManager:
                     f'本批大小={len(batch)}，累计={len(added_ids)}'
                 )
             return added_ids
+        except asyncio.CancelledError:
+            # 客户端超时/用户取消/进程被中止 → 任务被取消；必须回滚本次已写入的向量，
+            # 否则留下“半截 vectors”（历史已真实出现过 171 条半截向量），绝不吞掉取消。
+            logger.error(f'单文档重索引被取消（CancelledError），回滚本次写入：document_id={document_id}')
+            if added_ids:
+                # 仅删除本次该 document_id 已写入的 chunk ids（id 前缀保证只命中本文档）
+                collection.delete(ids=added_ids)
+                logger.info(
+                    f'回滚删除 {len(added_ids)} 条本次写入向量（document_id={document_id}），'
+                    f'其他文档/用户不受影响'
+                )
+            raise
         except Exception as e:
             logger.error(f'单文档重索引失败，回滚本次写入：{e}')
             if added_ids:

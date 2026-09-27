@@ -69,6 +69,8 @@ export interface RagCollectionInfoResult {
 // RAG API
 export const ragApi = {
   // 上传文档
+  // 大文件（如大型 Excel）会触发顺序 embedding，耗时可能远超普通 API 的 30s 超时，
+  // 因此上传使用独立长超时（5 分钟），避免浏览器在后端仍在处理时主动断开。
   uploadDocument: async (file: File, metadata?: any): Promise<RagUploadResult> => {
     const formData = new FormData()
     formData.append('file', file)
@@ -76,7 +78,8 @@ export const ragApi = {
       formData.append('metadata', JSON.stringify(metadata))
     }
     const res = await api.post('/rag/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000
     })
     return res as unknown as RagUploadResult
   },
