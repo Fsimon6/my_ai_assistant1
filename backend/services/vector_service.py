@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import os
+import re
 import concurrent.futures
 from typing import List, Dict, Any, Optional
 import logging
@@ -141,32 +142,141 @@ class AIAssistantEmbeddings(Embeddings):
 class VectorStoreManager:
     """向量存储管理器"""
 
+    # collection 路由基础设施相关常量
+    _LEGACY_COLLECTION = 'ai_assistant_docs'
+    _CUSTOM_PREFIX = 'ai_assistant_docs__'
+    _MAX_NAME_LEN = 63  # Chroma collection 名长度上限
+
     def __init__(self, persist_directory: str = './data/chroma_db'):
         self.persist_directory = persist_directory
         os.makedirs(persist_directory, exist_ok=True)
 
-        # 初始化embeddings
+        # 全局/legacy 模型（= settings.EMBEDDING_MODEL）对应的既有 collection 与 embeddings。
+        # 历史 271 条向量全部位于此 collection，本次改造保持 100% 兼容（绝不迁移/重嵌/删除）。
         self.embeddings = AIAssistantEmbeddings()
-
-        # 初始化Chroma
         self.vector_store = Chroma(
             persist_directory=persist_directory,
             embedding_function=self.embeddings,
-            collection_name='ai_assistant_docs',
+            collection_name=self._LEGACY_COLLECTION,
         )
+        # 单一 chromadb 客户端，供所有 collection 共享（避免多 PersistentClient 实例的锁冲突）。
+        self._client = self.vector_store._client
+
+        # 自定义模型（!= 全局模型）的 collection / embeddings 注册表，按【安全 collection 名】索引。
+        # 每个自定义 collection 绑定自己专属的 AIAssistantEmbeddings(model) 实例，
+        # 不复用、也不在调用间变更共享实例的 embedding_model（避免多模型竞态）。
+        self._custom_stores: Dict[str, Chroma] = {}
+        self._custom_embeddings: Dict[str, AIAssistantEmbeddings] = {}
+
+        # 启动时登记磁盘上已存在的自定义 collection（跨进程恢复，避免遗漏）。
+        self._register_existing_custom_collections()
+
+    # ------------------------------------------------------------------ #
+    # collection 路由基础设施
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _safe_collection_name(model: str) -> str:
+        """把任意 embedding model 名稳定映射为合法 Chroma collection 名。
+
+        - 仅保留 [A-Za-z0-9_-]，其余字符统一替换为 '_'（点号/短横线/空格等）。
+        - 前缀固定为 `ai_assistant_docs__`；同一 model 永远得到同一 collection 名。
+        - 简单、可读、稳定；不追求 hash。
+        """
+        if not model:
+            raise ValueError('embedding_model 不能为空')
+        # 仅保留 [A-Za-z0-9]，其余字符（点号/短横线/空格等）统一替换为 '_'。
+        safe = re.sub(r'[^A-Za-z0-9]', '_', model).strip('_')
+        name = f'{VectorStoreManager._CUSTOM_PREFIX}{safe}'
+        # 截断到 Chroma 上限（极少触发）；保留前缀与常规模型可读性。
+        return name[: VectorStoreManager._MAX_NAME_LEN]
+
+    def _resolve_store(self, embedding_model: str = None):
+        """按 embedding_model 返回 (Chroma, AIAssistantEmbeddings) 二元组。
+
+        - 全局模型 → 既有 `ai_assistant_docs`（legacy，兼容历史 271 条向量）。
+        - 自定义模型 → 懒创建独立 collection + 独立 embeddings 实例。
+        """
+        model = embedding_model or settings.EMBEDDING_MODEL
+        if model == settings.EMBEDDING_MODEL:
+            return self.vector_store, self.embeddings
+        name = self._safe_collection_name(model)
+        store = self._custom_stores.get(name)
+        if store is None:
+            store = self._create_custom_store(model, name)
+        return store, self._custom_embeddings[name]
+
+    def _create_custom_store(self, model: str, name: str) -> Chroma:
+        """为自定义模型创建（或复用）独立 collection，并绑定专属 embeddings。"""
+        # 把 embedding_model 记入 collection metadata，供跨进程恢复时正确绑定模型。
+        self._client.get_or_create_collection(
+            name=name, metadata={'embedding_model': model}
+        )
+        emb = AIAssistantEmbeddings(embedding_model=model)
+        store = Chroma(
+            client=self._client,
+            embedding_function=emb,
+            collection_name=name,
+        )
+        self._custom_stores[name] = store
+        self._custom_embeddings[name] = emb
+        logger.info(f'路由自定义 embedding model="{model}" → collection="{name}"')
+        return store
+
+    def _register_existing_custom_collections(self) -> None:
+        """启动登记磁盘上已存在的自定义 collection（不含 legacy）。"""
+        try:
+            for col in self._client.list_collections():
+                name = getattr(col, 'name', None)
+                if not name or not name.startswith(self._CUSTOM_PREFIX):
+                    continue
+                if name in self._custom_stores:
+                    continue
+                model = None
+                try:
+                    meta = self._client.get_collection(name=name).metadata or {}
+                    model = meta.get('embedding_model')
+                except Exception:
+                    model = None
+                if not model:
+                    logger.warning(
+                        f'跳过缺少 embedding_model 标记的自定义集合（不参与路由）：{name}'
+                    )
+                    continue
+                emb = AIAssistantEmbeddings(embedding_model=model)
+                store = Chroma(
+                    client=self._client,
+                    embedding_function=emb,
+                    collection_name=name,
+                )
+                self._custom_stores[name] = store
+                self._custom_embeddings[name] = emb
+                logger.info(f'恢复自定义集合：name="{name}" model="{model}"')
+        except Exception as e:
+            logger.warning(f'登记已存在自定义 collection 失败（忽略，不影响启动）：{e}')
+
+    def _iter_stores(self):
+        """遍历全部 collection（legacy + 已实例化自定义），用于需跨模型扫描的读/删操作。"""
+        yield self.vector_store
+        for s in self._custom_stores.values():
+            yield s
 
     async def add_documents(
         self,
         documents: List[Dict[str, Any]],
-        collection_name: str = 'ai_assistant_docs',
+        collection_name: str = _LEGACY_COLLECTION,
         embedding_model: str = None,
     ) -> List[str]:
-        """添加文档到向量数据库（复用单例 Chroma 客户端，避免每次上传重建客户端导致
-        查询/删除状态不一致）"""
+        """添加文档到向量数据库。
+
+        按 embedding_model 路由到对应 collection（全局模型→ai_assistant_docs，
+        自定义模型→ai_assistant_docs__<safe>）。复用单例 Chroma 客户端与单例 chromadb
+        客户端，避免每次上传重建客户端导致查询/删除状态不一致。
+        `collection_name` 仅保留为兼容参数（路由以 embedding_model 为准）。
+        """
         try:
-            # 按当前请求的向量模型设置 embedding（未指定则回退系统默认）
-            self.embeddings.embedding_model = embedding_model or settings.EMBEDDING_MODEL
-            effective_model = self.embeddings.embedding_model
+            # 按 embedding_model 路由到正确的 collection 与专属 embeddings（不突变共享实例）。
+            store, emb = self._resolve_store(embedding_model)
+            effective_model = emb.embedding_model
             # 提取内容和元数据
             contents = [doc['content'] for doc in documents]
             # 复制 metadata，避免就地修改调用方传入的对象
@@ -178,14 +288,17 @@ class VectorStoreManager:
                 m['indexed_embedding_model'] = effective_model
             ids = [doc['id'] for doc in documents]
 
-            # 复用已有的单例客户端，向其追加文本（保持 add/query/delete 使用同一客户端）
-            result_ids = self.vector_store.add_texts(
+            # 向路由目标 collection 追加文本（add_texts 使用其专属 embeddings 实例）。
+            result_ids = store.add_texts(
                 texts=contents,
                 metadatas=metadatas,
                 ids=ids,
             )
 
-            logger.info(f'成功添加{len(documents)}个文档到向量数据库')
+            logger.info(
+                f'成功添加{len(documents)}个文档到向量数据库 '
+                f'(collection={store._collection.name}, model={effective_model})'
+            )
             return result_ids
 
         except Exception as e:
@@ -213,14 +326,14 @@ class VectorStoreManager:
         """
         if not chunks:
             return []
-        # 按当前请求的向量模型设置 embedding（未指定则回退系统默认）
-        self.embeddings.embedding_model = embedding_model or settings.EMBEDDING_MODEL
-        effective_model = self.embeddings.embedding_model
+        # 按 embedding_model 路由到目标 collection 与专属 embeddings（不突变共享实例）。
+        store, emb = self._resolve_store(embedding_model)
+        effective_model = emb.embedding_model
         document_id = chunks[0].get('metadata', {}).get('document_id')
         total_batches = (len(chunks) + batch_size - 1) // batch_size
 
         added_ids: List[str] = []
-        collection = self.vector_store._collection
+        collection = store._collection
         try:
             for start in range(0, len(chunks), batch_size):
                 batch = chunks[start:start + batch_size]
@@ -230,7 +343,7 @@ class VectorStoreManager:
                 for m in metas:
                     m['indexed_embedding_model'] = effective_model
                 ids = [c['id'] for c in batch]
-                self.vector_store.add_texts(texts=texts, metadatas=metas, ids=ids)
+                store.add_texts(texts=texts, metadatas=metas, ids=ids)
                 added_ids.extend(ids)
                 logger.info(
                     f'重索引批次 {start // batch_size + 1}/{total_batches} 完成，'
@@ -268,12 +381,11 @@ class VectorStoreManager:
         filter_dict: Optional[Dict] = None,
         embedding_model: str = None,
     ) -> List[SearchResult]:
-        """相似度搜索"""
+        """相似度搜索（按 embedding_model 路由到对应 collection）。"""
         try:
-            # 按当前请求的向量模型设置 embedding（未指定则回退系统默认）
-            self.embeddings.embedding_model = embedding_model or settings.EMBEDDING_MODEL
-            # 执行搜索
-            results = self.vector_store.similarity_search_with_relevance_scores(
+            # 按 embedding_model 路由到目标 collection（其专属 embeddings 用于 query 嵌入）。
+            store, emb = self._resolve_store(embedding_model)
+            results = store.similarity_search_with_relevance_scores(
                 query=query,
                 k=k,
                 filter=filter_dict
@@ -289,7 +401,10 @@ class VectorStoreManager:
                     'id': doc.metadata.get('id', str(uuid.uuid4())),
                 })
 
-            logger.info(f'搜索查询"{query}"返回{len(formatted_results)}个结果')
+            logger.info(
+                f'搜索查询"{query}"返回{len(formatted_results)}个结果 '
+                f'(collection={store._collection.name}, model={emb.embedding_model})'
+            )
             return formatted_results
 
         except Exception as e:
@@ -303,44 +418,65 @@ class VectorStoreManager:
     ) -> int:
         """按 document_id（文档级）+ user_id 精确删除向量。
 
-        仅删除归属当前用户、且 document_id 在给定列表中的向量；不会误删其他文档或
-        其他用户数据。返回实际删除的向量数量（0 表示无匹配 / 越权）。
+        架构 C 下文档只属于单一 embedding model，但本方法不依赖外部知晓其模型：
+        遍历全部 collection（legacy + 自定义），仅删除归属当前用户、且 document_id
+        在给定列表中的向量；不会误删其他文档/用户。返回实际删除的向量总数
+        （0 表示无匹配 / 越权）。
         """
         try:
-            collection = self.vector_store._collection
-            if not collection or not document_ids:
+            if not document_ids:
                 return 0
             target = set(document_ids)
-            # 取出全量 id 与元数据，按 document_id + user_id 精确过滤
-            existing = collection.get(include=['metadatas'])
-            all_ids = existing.get('ids', [])
-            all_metas = existing.get('metadatas', [])
-            allowed_ids = [
-                vid for vid, meta in zip(all_ids, all_metas)
-                if meta and meta.get('document_id') in target
-                and (user_id is None or meta.get('user_id') == user_id)
-            ]
-            if allowed_ids:
-                collection.delete(ids=allowed_ids)
-            logger.info(f'成功删除{len(allowed_ids)}/{len(document_ids)}个文档的向量')
-            return len(allowed_ids)
+            deleted_total = 0
+            for store in self._iter_stores():
+                collection = store._collection
+                if not collection:
+                    continue
+                # 取出全量 id 与元数据，按 document_id + user_id 精确过滤
+                existing = collection.get(include=['metadatas'])
+                all_ids = existing.get('ids', [])
+                all_metas = existing.get('metadatas', [])
+                allowed_ids = [
+                    vid for vid, meta in zip(all_ids, all_metas)
+                    if meta and meta.get('document_id') in target
+                    and (user_id is None or meta.get('user_id') == user_id)
+                ]
+                if allowed_ids:
+                    collection.delete(ids=allowed_ids)
+                    deleted_total += len(allowed_ids)
+            logger.info(f'成功删除{deleted_total}/{len(document_ids)}个文档的向量')
+            return deleted_total
 
         except Exception as e:
             logger.error(f'删除文档失败：{e}')
             return 0
 
     def get_collection_info(self) -> Dict[str, Any]:
-        """获取集合信息"""
+        """获取集合信息（legacy + 自定义）。
+
+        返回 legacy 集合作为主信息，并附 custom_collections 列表
+        （含各自定义集合的 embedding_model 与 count）。
+        """
         try:
-            collection = self.vector_store._collection
-            if collection:
-                count = collection.count()
-                return {
-                    'total_documents': count,
-                    'collection_name': 'ai_assistant_docs',
-                    'persist_directory': self.persist_directory,
-                }
-            return {'total_documents': 0}
+            info: Dict[str, Any] = {
+                'total_documents': (
+                    self.vector_store._collection.count()
+                    if self.vector_store._collection else 0
+                ),
+                'collection_name': self._LEGACY_COLLECTION,
+                'persist_directory': self.persist_directory,
+                'custom_collections': [],
+            }
+            for name, store in self._custom_stores.items():
+                try:
+                    info['custom_collections'].append({
+                        'collection_name': name,
+                        'embedding_model': store._embedding_function.embedding_model,
+                        'count': store._collection.count() if store._collection else 0,
+                    })
+                except Exception:
+                    continue
+            return info
         except Exception as e:
             logger.error(f'获取集合信息失败：{e}')
             return {'total_documents': 0}
@@ -353,39 +489,41 @@ class VectorStoreManager:
         user_id: 服务端强制隔离；只聚合 metadata.user_id == user_id 的向量，杜绝跨用户泄露。
         """
         try:
-            collection = self.vector_store._collection
-            if not collection:
-                return []
-            data = collection.get(include=['metadatas'])
-            all_metas = data.get('metadatas', []) or []
-
             docs: Dict[str, Dict[str, Any]] = {}
-            for meta in all_metas:
-                if not meta:
+            # 遍历全部 collection，覆盖多模型索引的文档（同一用户可能跨模型建索引）。
+            for store in self._iter_stores():
+                collection = store._collection
+                if not collection:
                     continue
-                # 用户隔离：跳过非当前用户的向量
-                if user_id is not None and meta.get('user_id') != user_id:
-                    continue
-                doc_id = meta.get('document_id')
-                if not doc_id:
-                    continue
+                data = collection.get(include=['metadatas'])
+                all_metas = data.get('metadatas', []) or []
 
-                filename = meta.get('filename') or meta.get('source') or '未知文件'
-                existed = docs.get(doc_id)
-                if existed is None:
-                    existed = docs[doc_id] = {
-                        'document_id': doc_id,
-                        'filename': filename,
-                        'type': filename.rsplit('.', 1)[-1].lower() if '.' in filename else '',
-                        'size': int(meta.get('file_size') or 0),
-                        'chunks': 0,
-                        'created_at': meta.get('processed_at'),
-                    }
-                existed['chunks'] += 1
-                # 取最早的处理时间作为文档上传时间
-                pa = meta.get('processed_at')
-                if pa and (existed['created_at'] is None or pa < existed['created_at']):
-                    existed['created_at'] = pa
+                for meta in all_metas:
+                    if not meta:
+                        continue
+                    # 用户隔离：跳过非当前用户的向量
+                    if user_id is not None and meta.get('user_id') != user_id:
+                        continue
+                    doc_id = meta.get('document_id')
+                    if not doc_id:
+                        continue
+
+                    filename = meta.get('filename') or meta.get('source') or '未知文件'
+                    existed = docs.get(doc_id)
+                    if existed is None:
+                        existed = docs[doc_id] = {
+                            'document_id': doc_id,
+                            'filename': filename,
+                            'type': filename.rsplit('.', 1)[-1].lower() if '.' in filename else '',
+                            'size': int(meta.get('file_size') or 0),
+                            'chunks': 0,
+                            'created_at': meta.get('processed_at'),
+                        }
+                    existed['chunks'] += 1
+                    # 取最早的处理时间作为文档上传时间
+                    pa = meta.get('processed_at')
+                    if pa and (existed['created_at'] is None or pa < existed['created_at']):
+                        existed['created_at'] = pa
 
             return list(docs.values())
         except Exception as e:
@@ -402,27 +540,29 @@ class VectorStoreManager:
         无需新增数据库表，直接基于 Chroma 向量（每个 chunk 已存 document_id + user_id + chunk_index）。
         """
         try:
-            collection = self.vector_store._collection
-            if not collection:
-                return []
             # Chroma where 仅支持单操作符；多条件必须用 $and 包裹
             conds: List[Dict[str, Any]] = [{'document_id': document_id}]
             if user_id is not None:
                 conds.append({'user_id': user_id})
             where: Dict[str, Any] = {'$and': conds} if len(conds) > 1 else conds[0]
-            data = collection.get(where=where, include=['documents', 'metadatas'])
-            docs = data.get('documents', []) or []
-            metas = data.get('metadatas', []) or []
 
             chunks: List[Dict[str, Any]] = []
-            for content, meta in zip(docs, metas):
-                meta = meta or {}
-                idx = int(meta.get('chunk_index', 0) or 0)
-                chunks.append({
-                    'index': idx,
-                    'content': content,
-                    'source': meta.get('source') or meta.get('filename') or '',
-                })
+            # 文档只存在于其索引所用的单一 collection；跨全部 collection 扫描以正确定位。
+            for store in self._iter_stores():
+                collection = store._collection
+                if not collection:
+                    continue
+                data = collection.get(where=where, include=['documents', 'metadatas'])
+                docs = data.get('documents', []) or []
+                metas = data.get('metadatas', []) or []
+                for content, meta in zip(docs, metas):
+                    meta = meta or {}
+                    idx = int(meta.get('chunk_index', 0) or 0)
+                    chunks.append({
+                        'index': idx,
+                        'content': content,
+                        'source': meta.get('source') or meta.get('filename') or '',
+                    })
             chunks.sort(key=lambda c: c['index'])
             return chunks
         except Exception as e:
@@ -443,9 +583,6 @@ class VectorStoreManager:
         不调用 embedding、不写入 Chroma。
         """
         try:
-            collection = self.vector_store._collection
-            if not collection:
-                return []
             conds: List[Dict[str, Any]] = [{'document_id': document_id}]
             if sheet_name:
                 conds.append({'sheet_name': sheet_name})
@@ -454,19 +591,25 @@ class VectorStoreManager:
             if user_id is not None:
                 conds.append({'user_id': user_id})
             where: Dict[str, Any] = {'$and': conds} if len(conds) > 1 else conds[0]
-            data = collection.get(where=where, include=['documents', 'metadatas'])
-            docs = data.get('documents', []) or []
-            metas = data.get('metadatas', []) or []
+
             out: List[Dict[str, Any]] = []
-            for content, meta in zip(docs, metas):
-                meta = meta or {}
-                if meta.get('chunk_type') in chunk_types:
-                    out.append({
-                        'content': content,
-                        'metadata': meta,
-                        'score': 1.0,
-                        'id': meta.get('id') or str(meta.get('chunk_index')),
-                    })
+            # 跨全部 collection 扫描（文档只存在于其索引所用的单一 collection）。
+            for store in self._iter_stores():
+                collection = store._collection
+                if not collection:
+                    continue
+                data = collection.get(where=where, include=['documents', 'metadatas'])
+                docs = data.get('documents', []) or []
+                metas = data.get('metadatas', []) or []
+                for content, meta in zip(docs, metas):
+                    meta = meta or {}
+                    if meta.get('chunk_type') in chunk_types:
+                        out.append({
+                            'content': content,
+                            'metadata': meta,
+                            'score': 1.0,
+                            'id': meta.get('id') or str(meta.get('chunk_index')),
+                        })
             return out
         except Exception as e:
             logger.error(f'读取表格 chunk 失败：{e}')
