@@ -497,13 +497,9 @@ class VectorStoreManager:
             metas.append(m)
         new_ids = [c['id'] for c in chunks]
 
-        # 2) 先生成全部新 embedding（批量 <=20，复用统一边界）
-        new_embeddings: List[List[float]] = []
+        # 2) 先生成全部新 embedding（一次性提交完整 texts，由 llm.generate_embeddings 内部统一拆批 <=20）
         try:
-            for start in range(0, len(contents), self._EMBED_BATCH):
-                new_embeddings.extend(
-                    emb.embed_documents(contents[start:start + self._EMBED_BATCH])
-                )
+            new_embeddings = emb.embed_documents(contents)
         except Exception as e:
             logger.error(f'重索引生成 embedding 失败，旧版本保留：document_id={document_id}: {e}')
             raise
