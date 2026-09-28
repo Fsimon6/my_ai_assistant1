@@ -233,20 +233,29 @@ class LLMFactory:
     def from_env() -> BaseLLM:
         """从 settings 创建 LLM（统一配置入口）"""
         provider = settings.LLM_PROVIDER
-        if provider not in LLMFactory.SUPPORTED_PROVIDERS:
+        if not provider or provider not in LLMFactory.SUPPORTED_PROVIDERS:
             raise ValueError(f'不支持的provider：{provider}')
 
         # 按 provider 判断是否必须提供 API_KEY
         api_key = settings.API_KEY
         if provider in LLMFactory.PROVIDERS_REQUIRE_KEY and not api_key:
-            raise ValueError(f'provider={provider} 需要设置 API_KEY 环境变量')
+            # 仅报告缺失，绝不输出 Key 原文 / 前缀 / 长度 / hash
+            raise ValueError('API_KEY is missing')
+
+        # 模型配置缺失即显式报错，禁止静默落到历史默认模型（ERNIE-3.5-8k 等保留为兼容默认）
+        model = settings.LLM_MODEL
+        if not model:
+            raise ValueError('LLM_MODEL is missing')
+        embedding_model = settings.EMBEDDING_MODEL
+        if not embedding_model:
+            raise ValueError('EMBEDDING_MODEL is missing')
 
         config = LLMConfig(
             provider=provider,
             api_key=api_key,
             base_url=settings.LLM_BASE_URL,
-            model=settings.LLM_MODEL,
-            embedding_model=settings.EMBEDDING_MODEL,
+            model=model,
+            embedding_model=embedding_model,
             temperature=float(os.getenv('LLM_TEMPERATURE', '0.7')),
             max_tokens=int(os.getenv('LLM_MAX_TOKENS', '2000')),
         )

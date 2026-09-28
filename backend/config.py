@@ -60,6 +60,9 @@ class Config:
                 f'provider={settings.LLM_PROVIDER} 需要设置 API_KEY 环境变量'
             )
 
+        # 默认（非生产/非测试）配置同样要求模型配置显式给出，缺失/空字符串即失败
+        settings.validate_required()
+
         print('√ 配置验证通过')
         print(f' LLM Provider：{settings.LLM_PROVIDER}')
         print(f' Vector DB: {cls.VECTOR_DB_PATH}')

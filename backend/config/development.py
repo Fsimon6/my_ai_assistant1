@@ -115,6 +115,9 @@ class DevelopmentConfig:
                 f'provider={settings.LLM_PROVIDER} 需要设置 API_KEY 环境变量'
             )
 
+        # 开发环境同样要求模型配置显式给出，缺失/空字符串即失败，禁止静默 fallback
+        settings.validate_required()
+
         print('√ 配置验证通过')
         print(f' LLM Provider：{settings.LLM_PROVIDER}')
 
