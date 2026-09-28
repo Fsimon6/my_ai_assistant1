@@ -45,6 +45,22 @@ class EmbeddingServiceUnavailableError(EmbeddingError):
     user_message = 'Embedding 服务暂时不可用，请稍后重试。'
 
 
+class ReindexError(Exception):
+    """显式 document reindex 业务异常基类。"""
+
+
+class ReindexDocumentNotFound(ReindexError):
+    """指定 document_id 在 source collection 中找不到。"""
+
+
+class ReindexSourceNotFound(ReindexError):
+    """指定的 source_embedding_model 对应的 collection 不存在。"""
+
+
+class ReindexPermissionDenied(ReindexError):
+    """当前 user_id 不拥有该 document，禁止 reindex。"""
+
+
 def _run_async(coro):
     """在独立线程中运行协程，避免被 LangChain 在“运行中事件循环”内同步调用时
     asyncio.run() 报 “cannot be called from a running event loop”。
@@ -146,6 +162,7 @@ class VectorStoreManager:
     _LEGACY_COLLECTION = 'ai_assistant_docs'
     _CUSTOM_PREFIX = 'ai_assistant_docs__'
     _MAX_NAME_LEN = 63  # Chroma collection 名长度上限
+    _EMBED_BATCH = 20   # 远程 embedding 单次请求上限（与 add_texts 统一边界）
 
     def __init__(self, persist_directory: str = './data/chroma_db'):
         self.persist_directory = persist_directory
@@ -372,6 +389,225 @@ class VectorStoreManager:
                     f'其他文档/用户不受影响'
                 )
             raise
+
+    # ------------------------------------------------------------------ #
+    # 显式 document-level reindex（跨 model collection 重建索引）
+    # ------------------------------------------------------------------ #
+    def _get_source_collection(self, embedding_model: str):
+        """按 source_embedding_model 定位「只读」source collection（不会自动创建）。
+
+        - 全局模型 → legacy `ai_assistant_docs`（始终存在）。
+        - 自定义模型 → 按安全名查已存在的 collection；不存在则抛 ReindexSourceNotFound。
+        """
+        if embedding_model == settings.EMBEDDING_MODEL:
+            return self._LEGACY_COLLECTION, self.vector_store._collection
+        name = self._safe_collection_name(embedding_model)
+        try:
+            col = self._client.get_collection(name=name)
+        except Exception:
+            raise ReindexSourceNotFound(
+                f'source collection for model "{embedding_model}" not found (name={name})'
+            )
+        return name, col
+
+    def _get_document_chunks_from_collection(
+        self,
+        document_id: str,
+        user_id: Optional[int],
+        embedding_model: str = None,
+    ) -> List[Dict[str, Any]]:
+        """从「单一指定」source collection 读取某文档全部 chunk（不跨多模型合并）。
+
+        返回每项为 {id, content, metadata}，并按 chunk_index 排序；保留完整 metadata 与原始 id。
+        供显式 reindex 作为 source 使用，绝不影响 get_document_chunks 既有公开 API。
+        """
+        model = embedding_model or settings.EMBEDDING_MODEL
+        _, collection = self._get_source_collection(model)
+        conds: List[Dict[str, Any]] = [{'document_id': document_id}]
+        if user_id is not None:
+            conds.append({'user_id': user_id})
+        where: Dict[str, Any] = {'$and': conds} if len(conds) > 1 else conds[0]
+
+        data = collection.get(where=where, include=['documents', 'metadatas'])
+        docs = data.get('documents', []) or []
+        metas = data.get('metadatas', []) or []
+        ids = data.get('ids', []) or []
+        out: List[Dict[str, Any]] = []
+        for content, meta, cid in zip(docs, metas, ids):
+            meta = meta or {}
+            out.append({'id': cid, 'content': content, 'metadata': dict(meta)})
+        out.sort(key=lambda c: int(c['metadata'].get('chunk_index', 0) or 0))
+        return out
+
+    def _restore_target(
+        self,
+        collection,
+        ids: List[str],
+        embeddings: List[List[float]],
+        documents: List[str],
+        metadatas: List[Dict[str, Any]],
+    ) -> None:
+        """把快照的旧 target 文档向量写回（失败恢复用）。"""
+        if not ids:
+            return
+        try:
+            collection.add(ids=ids, embeddings=embeddings,
+                           documents=documents, metadatas=metadatas)
+        except Exception as e:
+            logger.error(f'恢复旧 target 版本失败（数据可能丢失）：{e}')
+
+    async def _reindex_document_replace(
+        self,
+        chunks: List[Dict[str, Any]],
+        embedding_model: str,
+        user_id: Optional[int],
+        document_id: str,
+    ) -> List[str]:
+        """target collection 已存在该 document 时：安全「原子替换」并保留旧版可恢复。
+
+        顺序：
+        1) 快照旧 target 文档（含向量）；
+        2) 先离线生成全部新 embedding（唯一会触发远程调用的步骤；失败则旧版完全不动）；
+        3) 删除旧版本 + 写入新版本；任一失败 → 从快照恢复旧版本并 re-raise。
+        绝不产生「旧 + 新」混合（duplicate），也绝不会在失败时让旧版永久消失。
+        """
+        store, emb = self._resolve_store(embedding_model)
+        effective_model = emb.embedding_model
+        collection = store._collection
+
+        old = collection.get(
+            where={'$and': [{'document_id': document_id}, {'user_id': user_id}]},
+            include=['embeddings', 'documents', 'metadatas'],
+        )
+        old_ids = old.get('ids', []) or []
+        _emb = old.get('embeddings')
+        # chromadb 可能以 numpy ndarray 返回 embeddings，需转回 list[list] 以便恢复写入
+        old_embeddings = (
+            [e.tolist() if hasattr(e, 'tolist') else e for e in _emb]
+            if _emb is not None else []
+        )
+        old_docs = old.get('documents', []) or []
+        old_metas = old.get('metadatas', []) or []
+
+        contents = [c['content'] for c in chunks]
+        metas = []
+        for c in chunks:
+            m = dict(c['metadata'])
+            m['indexed_embedding_model'] = effective_model
+            metas.append(m)
+        new_ids = [c['id'] for c in chunks]
+
+        # 2) 先生成全部新 embedding（批量 <=20，复用统一边界）
+        new_embeddings: List[List[float]] = []
+        try:
+            for start in range(0, len(contents), self._EMBED_BATCH):
+                new_embeddings.extend(
+                    emb.embed_documents(contents[start:start + self._EMBED_BATCH])
+                )
+        except Exception as e:
+            logger.error(f'重索引生成 embedding 失败，旧版本保留：document_id={document_id}: {e}')
+            raise
+
+        # 3) 删除旧版本 + 写入新版本（失败恢复旧版本）
+        try:
+            if old_ids:
+                collection.delete(ids=old_ids)
+            collection.add(ids=new_ids, embeddings=new_embeddings,
+                           documents=contents, metadatas=metas)
+        except asyncio.CancelledError:
+            logger.error(f'重索引被取消，恢复旧版本：document_id={document_id}')
+            self._restore_target(collection, old_ids, old_embeddings, old_docs, old_metas)
+            raise
+        except Exception as e:
+            logger.error(f'重索引写入失败，恢复旧版本：document_id={document_id}: {e}')
+            self._restore_target(collection, old_ids, old_embeddings, old_docs, old_metas)
+            raise
+        return new_ids
+
+    async def reindex_document_to_model(
+        self,
+        document_id: str,
+        user_id: Optional[int],
+        target_embedding_model: str,
+        source_embedding_model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """显式 document-level reindex：把已有文档从 source model collection 重建到 target model collection。
+
+        流程：校验 user 归属 → 从单一 source collection 读取最终 chunks（保持 content / metadata /
+        chunk 顺序 / id）→ 用现有 llm embedding（统一 batch <=20）写入 target collection。
+
+        - source_embedding_model 默认 settings.EMBEDDING_MODEL（legacy），覆盖 271 条历史文档。
+        - source == target 明确拒绝（避免原地自删自写导致文档消失）。
+        - 不重新解析任何原文件；不修改 source collection；失败不影响 source。
+        - 不新增 SQL / DB / API。
+        """
+        source_model = source_embedding_model or settings.EMBEDDING_MODEL
+        if source_model == target_embedding_model:
+            raise ValueError(
+                'source and target embedding model are identical; '
+                'no cross-model reindex required'
+            )
+
+        # 1) 定位 source collection（只读，不自动创建）
+        try:
+            src_name, src_col = self._get_source_collection(source_model)
+        except ReindexSourceNotFound:
+            raise
+
+        # 2) 存在性 + user 归属校验（越权/不存在给出明确错误，区分于“未找到”）
+        probe = src_col.get(where={'document_id': document_id}, include=['metadatas'])
+        metas = probe.get('metadatas', []) or []
+        if not metas:
+            raise ReindexDocumentNotFound(
+                f'document {document_id} not found in source collection "{src_name}"'
+            )
+        if not any((m or {}).get('user_id') == user_id for m in metas):
+            raise ReindexPermissionDenied(
+                f'user {user_id} is not permitted to reindex document {document_id}'
+            )
+
+        # 3) 读取单一 source collection 的 chunks（保持顺序/metadata/id）
+        chunks = self._get_document_chunks_from_collection(
+            document_id, user_id, source_model)
+        if not chunks:
+            raise ReindexDocumentNotFound(
+                f'document {document_id} has no chunks in source collection "{src_name}"'
+            )
+
+        re_chunks = [{
+            'content': c['content'],
+            'metadata': dict(c['metadata']),
+            'id': c['id'],
+        } for c in chunks]
+
+        # 4) 判定 target 是否已存在该文档（决定首次创建还是安全替换）
+        target_name = (self._LEGACY_COLLECTION
+                       if target_embedding_model == settings.EMBEDDING_MODEL
+                       else self._safe_collection_name(target_embedding_model))
+        try:
+            target_col = self._client.get_collection(name=target_name)
+            existing = target_col.get(
+                where={'$and': [{'document_id': document_id}, {'user_id': user_id}]},
+                include=[])
+            existing_ids = existing.get('ids', []) or []
+        except Exception:
+            existing_ids = []
+
+        if existing_ids:
+            await self._reindex_document_replace(
+                re_chunks, target_embedding_model, user_id, document_id)
+        else:
+            await self.reindex_document(
+                re_chunks, embedding_model=target_embedding_model,
+                batch_size=self._EMBED_BATCH)
+
+        return {
+            'document_id': document_id,
+            'source_model': source_model,
+            'target_model': target_embedding_model,
+            'target_collection': target_name,
+            'chunk_count': len(re_chunks),
+        }
 
     async def search(
         self,
