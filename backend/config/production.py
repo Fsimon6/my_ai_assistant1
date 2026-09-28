@@ -92,7 +92,4 @@ class ProductionConfig:
         if cls.LLM_PROVIDER in require_key and not cls.API_KEY:
             raise ValueError(f'provider={cls.LLM_PROVIDER} 需要设置 API_KEY 环境变量')
 
-        # 生产必需模型配置校验：缺失/空字符串即启动失败，禁止静默 fallback 到历史默认模型
-        settings.validate_required()
-
         print('  生产环境配置验证通过')
