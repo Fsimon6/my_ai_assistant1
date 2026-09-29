@@ -84,7 +84,7 @@ async def upload_document(
             user_id=current_user.id,
             original_filename=original_filename,
             file_size=file_size,
-            embedding_model=embedding_model
+            embedding_model=None  # 统一以 .env 全局 EMBEDDING_MODEL 为准，忽略客户端表单参数
         )
 
         if result['success']:
@@ -136,9 +136,12 @@ async def query_document(
     try:
         rag_service = get_rag_service()
 
-        # 解析角色级模型（可选）：传入 character_id 时按归属用户取出 model+api_key+embedding_model 覆盖全局默认
-        # 注意：char_embedding_model 必须在此处初始化为 None，否则未传 character_id 时
-        # 下方无条件引用会触发 UnboundLocalError（导致 /rag/query 与 /rag/query-with-history 直接 500）。
+        # 解析角色级模型（可选）：仅用于 Chat 生成模型（model + api_key）覆盖全局默认。
+        # 注意：Character.embedding_model 不再参与正常 RAG Embedding —— 统一以 .env 全局
+        # EMBEDDING_MODEL 为准（产品要求）。故此处不再读取/传递 embedding_model，
+        # char_embedding_model 恒为 None，使 vector_service 回退到 settings.EMBEDDING_MODEL。
+        # char_embedding_model 仍需初始化为 None，避免未传 character_id 时下方无条件引用
+        # 触发 UnboundLocalError（导致 /rag/query 与 /rag/query-with-history 直接 500）。
         char_model, char_api_key, char_embedding_model = None, None, None
         if req.character_id:
             from backend.services.character_service import character_service
@@ -147,7 +150,6 @@ async def query_document(
                 raise HTTPException(status_code=404, detail='角色不存在')
             char_model = character.model
             char_api_key = character.api_key
-            char_embedding_model = character.embedding_model
 
         # 对话历史持久化（仅在有 character_id 的聊天上下文；P3 修复）
         conv_id = None
@@ -248,9 +250,12 @@ async def query_with_history(
     try:
         rag_service = get_rag_service()
 
-        # 解析角色级模型（可选）：传入 character_id 时按归属用户取出 model+api_key+embedding_model 覆盖全局默认
-        # 注意：char_embedding_model 必须在此处初始化为 None，否则未传 character_id 时
-        # 下方无条件引用会触发 UnboundLocalError（导致 /rag/query 与 /rag/query-with-history 直接 500）。
+        # 解析角色级模型（可选）：仅用于 Chat 生成模型（model + api_key）覆盖全局默认。
+        # 注意：Character.embedding_model 不再参与正常 RAG Embedding —— 统一以 .env 全局
+        # EMBEDDING_MODEL 为准（产品要求）。故此处不再读取/传递 embedding_model，
+        # char_embedding_model 恒为 None，使 vector_service 回退到 settings.EMBEDDING_MODEL。
+        # char_embedding_model 仍需初始化为 None，避免未传 character_id 时下方无条件引用
+        # 触发 UnboundLocalError（导致 /rag/query 与 /rag/query-with-history 直接 500）。
         char_model, char_api_key, char_embedding_model = None, None, None
         if req.character_id:
             from backend.services.character_service import character_service
@@ -259,7 +264,6 @@ async def query_with_history(
                 raise HTTPException(status_code=404, detail='角色不存在')
             char_model = character.model
             char_api_key = character.api_key
-            char_embedding_model = character.embedding_model
 
         # 对话历史持久化（仅在有 character_id 的聊天上下文；P3 修复）
         conv_id = None
