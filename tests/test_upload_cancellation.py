@@ -97,6 +97,14 @@ class FakeVectorStore:
         return removed
 
 
+class _FakeEmbeddings:
+    """替代 _resolve_store 返回的真实 embeddings，仅满足 reindex_document 读取 embedding_model。
+
+    实际 embedding 由 fake store 的 add_texts 跳过（不联网）。
+    """
+    embedding_model = 'test-model'
+
+
 def _make_rep(document_id, user_id, filename):
     cols = [{
         'col_index': c, 'col_letter': chr(64 + c), 'technical_name': f'C{c}',
@@ -240,7 +248,8 @@ async def test_reindex_cancel(kind):
     fake = FakeVectorStore()
     fake._collection.store['other_1'] = True  # 其他文档的向量，须不受影响
     manager = VectorStoreManager(persist_directory=os.path.join(TMP, 'reindex_chroma'))
-    manager.vector_store = fake  # 替换为 fake，避免真实 Chroma / embedding
+    # 注：96df333 起 reindex_document 经 _resolve_store 路由到 per-model collection，
+    # 旧的 manager.vector_store 内部结构已被移除；fake 通过下方 _resolve_store 补丁注入。
 
     doc_id = 'reidx_' + kind
     chunks = _make_chunks(doc_id, 3)  # batch_size=2 -> batch1(2) ok, batch2(1) 触发
@@ -266,7 +275,11 @@ async def test_reindex_cancel(kind):
     fake.add_texts = add_texts
     raised = {}
     try:
-        await manager.reindex_document(chunks, embedding_model='test-model', batch_size=2)
+        # 96df333 起 reindex_document 经 _resolve_store 路由到 per-model collection；
+        # 让该路由返回 fake store（而非已被移除的 vector_store 内部结构），保持完全离线。
+        with mock.patch.object(VectorStoreManager, '_resolve_store',
+                                return_value=(fake, _FakeEmbeddings())):
+            await manager.reindex_document(chunks, embedding_model='test-model', batch_size=2)
     except asyncio.CancelledError:
         raised['cancel'] = True
     except RuntimeError:
