@@ -3,7 +3,6 @@ export interface Character {
   name: string
   system_prompt: string
   model: string
-  embedding_model?: string
   conversation_count: number
   created_at?: string
   owner_id?: number
@@ -15,7 +14,6 @@ export interface CharacterCreate {
   system_prompt: string
   model?: string
   api_key?: string
-  embedding_model?: string
 }
 
 export interface CharacterUpdate {
@@ -23,7 +21,6 @@ export interface CharacterUpdate {
   system_prompt?: string
   model?: string
   api_key?: string
-  embedding_model?: string
 }
 
 export interface SpeakRequest {

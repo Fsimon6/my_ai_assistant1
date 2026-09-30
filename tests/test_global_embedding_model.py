@@ -213,21 +213,20 @@ def main():
         check('override 机制仅保留给 reindex（不用于正常 RAG）',
               'qwen3.7-text-embedding-flash' in captured, f'captured={captured}')
 
-    # ---------------- Test8：Character partial（仅 model 无 api_key）422 行为保留 ----------------
-    # character schema / service 未改动，仅确认既有部分填充校验逻辑仍在。
-    try:
-        from backend.schemas.character import CharacterCreate  # noqa: E402
-        tried = True
-    except Exception:
-        tried = False
-    if tried:
-        # 既有 422 规则由 character_service / characters.py 强制，schema 仅声明字段；
-        # 这里只确认字段声明未被删除（embedding_model 仍存在）。
-        fields = CharacterCreate.model_fields
-        check('Character schema 仍含 embedding_model 字段（数据不动）',
-              'embedding_model' in fields, f'fields={list(fields)}')
-    else:
-        check('Character schema 导入可用', False, 'CharacterCreate 不可导入')
+    # ---------------- Test8：Character schema 不再暴露 embedding_model（DB 列/历史数据保留） ----------------
+    # 本轮语义修复：正常 API 不再把 embedding_model 作为用户可配置字段；
+    # 但 DB 列（models.character.AICharacter.embedding_model）与历史记录（如 26/31 的 qwen 值）不动。
+    from backend.schemas.character import CharacterCreate, CharacterUpdate  # noqa: E402
+    from backend.models.character import AICharacter  # noqa: E402
+    fields_create = CharacterCreate.model_fields
+    fields_update = CharacterUpdate.model_fields
+    check('CharacterCreate 不再暴露 embedding_model',
+          'embedding_model' not in fields_create, f'fields={list(fields_create)}')
+    check('CharacterUpdate 不再暴露 embedding_model',
+          'embedding_model' not in fields_update, f'fields={list(fields_update)}')
+    cols = {c.name for c in AICharacter.__table__.columns}
+    check('DB 列 embedding_model 保留（历史数据不动）',
+          'embedding_model' in cols, f'cols={sorted(cols)}')
 
     print(f'\n=== {PASS}/{PASS + FAIL} PASS ===' if FAIL == 0
           else f'\n=== FAIL={FAIL} PASS={PASS} ===')

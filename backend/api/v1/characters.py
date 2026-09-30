@@ -44,7 +44,6 @@ async def create_character(
         system_prompt=character_data.system_prompt,
         model=character_data.model,
         api_key=character_data.api_key,
-        embedding_model=character_data.embedding_model,
         user_id=current_user.id,
     )
 
@@ -58,7 +57,7 @@ async def create_character(
             'name': character.name,
             'system_prompt': character.system_prompt,
             'model': character.model,
-            'embedding_model': character.embedding_model,
+
             'conversation_count': character.total_conversations or 0,
             'created_at': character.created_at.isoformat() if character.created_at else None,
             'update_at': character.updated_at.isoformat() if character.updated_at else None,
@@ -115,7 +114,7 @@ async def get_character(
             'name': character.name,
             'system_prompt': character.system_prompt,
             'model': character.model,
-            'embedding_model': character.embedding_model,
+
             'conversation_count': character.total_conversations or 0,
             'conversation_history': [],
             'created_at': character.created_at.isoformat() if character.created_at else None,
@@ -139,7 +138,6 @@ async def update_character(
         system_prompt=character_data.system_prompt,
         model=character_data.model,
         api_key=character_data.api_key,
-        embedding_model=character_data.embedding_model,
         user_id=current_user.id,
     )
     if not result['success']:
@@ -152,7 +150,7 @@ async def update_character(
             'name': character.name,
             'system_prompt': character.system_prompt,
             'model': character.model,
-            'embedding_model': character.embedding_model,
+
             'conversation_count': character.total_conversations or 0,
             'created_at': character.created_at.isoformat() if character.created_at else None,
             'update_at': character.updated_at.isoformat() if character.updated_at else None,
