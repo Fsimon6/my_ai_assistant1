@@ -176,7 +176,8 @@ const formatSource = (src: any): string => {
   const name = src.filename || src.document_id || '文档'
   const sheet = src.sheet_name ? `・${src.sheet_name}` : ''
   const range = src.range ? `・${src.range}` : ''
-  return `${name}${sheet}${range}`
+  const col = src.column ? `・列${src.column}` : ''
+  return `${name}${sheet}${range}${col}`
 }
 
 const loadDocuments = async () => {

@@ -276,7 +276,8 @@ class TableQAService:
                     "message": str(e), "timestamp": ts(),
                 }) + "\n"
                 return
-            sources = self._phase1_sources(document_id) if document_id else []
+            raw = await self.rag.retrieve_sources(question, user_id, document_id)
+            sources = self._phase1_sources(document_id, raw)
             yield json.dumps({**base, "type": "complete", "content": "", "sources": sources,
                               "timestamp": ts()}) + "\n"
             return
@@ -322,7 +323,9 @@ class TableQAService:
                     query=question, user_id=user_id, document_id=document_id,
                 ):
                     text += ch
-            sources = self._phase1_sources(document_id) if document_id else []
+            # 真实来源 metadata（来自检索命中 chunk；不重算坐标，不改变 answer）
+            raw = await self.rag.retrieve_sources(question, user_id, document_id)
+            sources = self._phase1_sources(document_id, raw)
             return {
                 **base, "execute": True,
                 "chain": "Phase1-Retrieval",
@@ -373,8 +376,16 @@ class TableQAService:
 
     # =================== 5) 统一 Source ===================
     @staticmethod
-    def _phase1_sources(document_id: Optional[str]) -> List[Dict[str, Any]]:
-        """Phase 1 来源（best-effort，从 Representation 读取，不修改 Phase 1）。"""
+    def _phase1_sources(
+        document_id: Optional[str],
+        raw_sources: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Phase 1 来源：优先用检索命中的真实 chunk metadata（range/row/column 不再置空）；
+        仅在无法取得真实命中时，从 Representation 读 best-effort（range/row 可能为 None）。"""
+        if raw_sources:
+            uni = TableQAService._to_unified(raw_sources)
+            if uni:
+                return uni[:5]
         if not document_id:
             return []
         try:
@@ -393,14 +404,46 @@ class TableQAService:
                 "table_id": t.get("table_id"),
                 "range": None,
                 "row_index": None,
+                "row_start": None,
+                "row_end": None,
+                "column": None,
+                "column_start": None,
+                "column_end": None,
                 "match_mode": "semantic",
             }]
         except Exception:  # noqa: BLE001
             return []
 
     @staticmethod
+    def _to_unified(raw_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """将检索命中 metadata 规整为统一 Source（保留真实 range/row/column）。"""
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for s in raw_list:
+            key = (s.get('document_id'), s.get('sheet_name'), s.get('table_id'),
+                   s.get('range'), s.get('chunk_type'))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "document_id": s.get("document_id"),
+                "filename": s.get("filename"),
+                "sheet_name": s.get("sheet_name"),
+                "table_id": s.get("table_id"),
+                "range": s.get("range"),
+                "row_index": s.get("row_start") if s.get("row_start") is not None else s.get("row_index"),
+                "row_start": s.get("row_start"),
+                "row_end": s.get("row_end"),
+                "column": s.get("column"),
+                "column_start": s.get("column_start"),
+                "column_end": s.get("column_end"),
+                "match_mode": s.get("match_mode") or "semantic",
+            })
+        return out
+
+    @staticmethod
     def _normalize_sources(sources: Optional[List[Dict[str, Any]]], match_mode: Optional[str]) -> List[Dict[str, Any]]:
-        """Phase 2 sources 对齐到统一 Source Schema（补 table_id / match_mode）。"""
+        """Phase 2 sources 对齐到统一 Source Schema（补 table_id / match_mode / column 等）。"""
         out = []
         for s in (sources or []):
             out.append({
@@ -410,6 +453,11 @@ class TableQAService:
                 "table_id": s.get("table_id"),
                 "range": s.get("range"),
                 "row_index": s.get("row_index"),
+                "row_start": s.get("row_start"),
+                "row_end": s.get("row_end"),
+                "column": s.get("column"),
+                "column_start": s.get("column_start"),
+                "column_end": s.get("column_end"),
                 "match_mode": match_mode or s.get("match_mode"),
             })
         return out

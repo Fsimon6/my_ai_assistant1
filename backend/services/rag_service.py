@@ -23,6 +23,7 @@ from backend.services.table_representation import (
     store_original,
     save_representation_json,
     load_representation,
+    col_letter,
     TableParseValidationError,
 )
 from pathlib import Path
@@ -1212,6 +1213,131 @@ class RagService:
         ]
 
         return messages
+
+
+    # ----------------- Citation：仅提取真实来源元数据（不改变 answer） -----------------
+    # 与 rag_query / query_with_history 共用同一检索路径（_retrieve_and_expand），
+    # 但只返回命中 chunk 的真实 metadata，供 TableQAService 汇总统一 Source。
+    # 不调用 LLM、不生成回答；因此“同一问题得到同样的 answer，只是 sources 更完整”。
+    _CITATION_CHUNK_TYPES = {
+        'workbook_summary', 'sheet_schema', 'row_group', 'table_structured_access',
+    }
+
+    async def retrieve_sources(
+        self,
+        query: str,
+        user_id: Optional[int] = None,
+        document_id: Optional[str] = None,
+        context_count: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """返回查询命中的真实来源元数据（与 rag_query 同一检索路径，仅用于 Citation）。
+
+        纯读取，不调用 LLM、不生成回答；不改变任何执行/排序/路由逻辑。
+        """
+        conds: List[Dict[str, Any]] = []
+        if user_id is not None:
+            conds.append({'user_id': user_id})
+        if document_id:
+            conds.append({'document_id': document_id})
+        filter_dict: Optional[Dict[str, Any]] = (
+            {'$and': conds} if len(conds) > 1 else (conds[0] if conds else None)
+        )
+        try:
+            results = await self._retrieve_and_expand(
+                query=query, k=context_count, filter_dict=filter_dict,
+                user_id=user_id, embedding_model=None,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'Citation 来源检索失败：{e}')
+            return []
+        return RagService._extract_sources(results)
+
+    @staticmethod
+    def _extract_sources(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """从检索结果中提取真实来源元数据（已带真实 range/row/column）。"""
+        out: List[Dict[str, Any]] = []
+        for c in results:
+            m = c.get('metadata', {}) or {}
+            ct = m.get('chunk_type')
+            if ct not in RagService._CITATION_CHUNK_TYPES:
+                continue
+            src = (
+                RagService._source_from_struct(m)
+                if ct == 'table_structured_access'
+                else RagService._source_from_chunk(m)
+            )
+            if src:
+                src['score'] = c.get('score')
+                out.append(src)
+        return out
+
+    @staticmethod
+    def _source_from_chunk(m: Dict[str, Any]) -> Dict[str, Any]:
+        """普通语义检索 chunk 的真实坐标（range/row/column 已在 chunk metadata 中）。"""
+        cs = m.get('column_start')
+        ce = m.get('column_end')
+        col = None
+        if isinstance(cs, int) and isinstance(ce, int) and cs > 0 and ce > 0:
+            try:
+                col = f"{col_letter(cs)}:{col_letter(ce)}"
+            except Exception:
+                col = None
+        return {
+            'document_id': m.get('document_id'),
+            'filename': m.get('filename') or m.get('source'),
+            'sheet_name': m.get('sheet_name'),
+            'table_id': m.get('table_id'),
+            'range': m.get('range'),
+            'row_index': m.get('row_start'),
+            'row_start': m.get('row_start'),
+            'row_end': m.get('row_end'),
+            'column': col,
+            'column_start': cs,
+            'column_end': ce,
+            'chunk_type': m.get('chunk_type'),
+            'match_mode': 'semantic',
+        }
+
+    @staticmethod
+    def _source_from_struct(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """结构化访问 chunk 的真实坐标：row 已在 metadata，range/column 从 Representation 表结构推导。"""
+        doc_id = m.get('document_id')
+        sheet = m.get('sheet_name')
+        table_id = m.get('table_id')
+        rs = m.get('row_start')
+        re_ = m.get('row_end')
+        rng = None
+        col = None
+        try:
+            rep = load_representation(doc_id)
+            if rep:
+                t = RagService._locate_table(rep, sheet, table_id)
+                if t:
+                    ncols = t.get('col_count') or 0
+                    nrows = t.get('row_count') or 0
+                    if ncols:
+                        col = f"A:{col_letter(ncols)}"
+                        if rs and re_:
+                            rng = f"A{rs}:{col_letter(ncols)}{re_}"
+                        elif nrows:
+                            rng = f"A1:{col_letter(ncols)}{nrows}"
+        except Exception:
+            pass
+        return {
+            'document_id': doc_id,
+            'filename': m.get('filename') or m.get('source'),
+            'sheet_name': sheet,
+            'table_id': table_id,
+            'range': rng,
+            'row_index': rs,
+            'row_start': rs,
+            'row_end': re_,
+            'column': col,
+            'column_start': 1,
+            'column_end': None,
+            'chunk_type': 'table_structured_access',
+            'match_mode': 'structured',
+        }
 
 
 # 单例实例
