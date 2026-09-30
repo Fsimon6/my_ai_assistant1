@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str | None = None
     LLM_MODEL: Optional[str] = None
 
+    # LLM / Embedding 客户端读取超时（秒）。
+    # 唯一控制 Chat（流式/非流式）与 Embedding（每批）共用的 httpx read timeout；
+    # 流式场景下 read 指「相邻 chunk 间隔」上限，不会截断正常长文本生成。
+    # 默认值 120 与历史运行行为保持一致；可由 .env 的 LLM_TIMEOUT 覆盖（Pydantic settings 读取）。
+    LLM_TIMEOUT: int = 120
+
     # 嵌入模型（EMBEDDING_MODEL 仅用于 Embedding，与 LLM_MODEL（Chat）解耦）；
     # 同样为生产必需，缺失/空字符串即启动失败。
     EMBEDDING_PROVIDER: str = "local"

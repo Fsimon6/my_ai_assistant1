@@ -92,7 +92,7 @@ class OpenAILikeLLM(BaseLLM):
             # - max_retries 默认 1：仅吞掉瞬时抖动；不掩盖 401/403（不可重试），
             #   也不在长超时上反复重试放大等待。
             # 默认已足够安全，可通过环境变量覆盖，但无需改动 .env。
-            _read_timeout = float(os.getenv('LLM_TIMEOUT', '120'))
+            _read_timeout = float(settings.LLM_TIMEOUT)
             _max_retries = int(os.getenv('LLM_MAX_RETRIES', '1'))
             _timeout = httpx.Timeout(
                 connect=10.0,
