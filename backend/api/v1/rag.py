@@ -17,6 +17,15 @@ from backend.services.conversation_service import conversation_service
 router = APIRouter(prefix='/api/v1/rag', tags=['RAG'])
 logger = logging.getLogger(__name__)
 
+# Embedding 错误类型 -> HTTP 状态（语义化，便于前端/监控区分配置类与服务类故障）
+_EMBEDDING_ERROR_STATUS = {
+    'EMBEDDING_QUOTA_EXCEEDED': 429,
+    'EMBEDDING_RATE_LIMITED': 429,
+    'EMBEDDING_AUTH_ERROR': 502,
+    'EMBEDDING_BAD_REQUEST': 502,
+    'EMBEDDING_SERVICE_ERROR': 503,
+}
+
 
 class QueryRequest(BaseModel):
     """查询请求体（与前端 ragApi.queryDocument POST 体一致）"""
@@ -101,10 +110,9 @@ async def upload_document(
             # （不暴露 API Key / 原始响应细节）。quota/rate-limit 用 429，服务错误用 503。
             error_type = result.get('error_type')
             if error_type:
-                if error_type in ('EMBEDDING_QUOTA_EXCEEDED', 'EMBEDDING_RATE_LIMITED'):
-                    status_code = 429
-                else:
-                    status_code = 503
+                # 不同 embedding 错误映射到语义正确的 HTTP 状态：
+                # quota/rate -> 429；auth/请求参数(配置类) -> 502；其余服务错误 -> 503。
+                status_code = _EMBEDDING_ERROR_STATUS.get(error_type, 503)
                 raise HTTPException(
                     status_code=status_code,
                     detail={

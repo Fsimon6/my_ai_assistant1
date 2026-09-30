@@ -486,6 +486,10 @@ const handleFileUploaded = async (fileData: any) => {
         msg = detail.message || 'Embedding 请求过于频繁，请稍后重试。'
       } else if (detail.error_type === 'EMBEDDING_SERVICE_ERROR') {
         msg = detail.message || 'Embedding 服务暂时不可用，请稍后重试。'
+      } else if (detail.error_type === 'EMBEDDING_AUTH_ERROR') {
+        msg = detail.message || 'Embedding 服务鉴权失败，请检查 Provider API Key / 凭证配置。'
+      } else if (detail.error_type === 'EMBEDDING_BAD_REQUEST') {
+        msg = detail.message || 'Embedding 请求参数错误，请检查 Provider 模型与参数配置。'
       } else if (typeof detail === 'string') {
         msg = detail
       }

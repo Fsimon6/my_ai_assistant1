@@ -45,6 +45,18 @@ class EmbeddingServiceUnavailableError(EmbeddingError):
     user_message = 'Embedding 服务暂时不可用，请稍后重试。'
 
 
+class EmbeddingAuthError(EmbeddingError):
+    """Provider 401/403 鉴权失败（API Key / 凭证问题），属配置错误而非可重试故障。"""
+    error_type = 'EMBEDDING_AUTH_ERROR'
+    user_message = 'Embedding 服务鉴权失败，请检查 Provider API Key / 凭证配置。'
+
+
+class EmbeddingBadRequestError(EmbeddingError):
+    """Provider 400 请求参数错误（如模型不存在 / 不支持的参数），属配置错误。"""
+    error_type = 'EMBEDDING_BAD_REQUEST'
+    user_message = 'Embedding 请求参数错误，请检查 Provider 模型与参数配置（如模型名称/维度）。'
+
+
 class ReindexError(Exception):
     """显式 document reindex 业务异常基类。"""
 
@@ -118,6 +130,8 @@ class AIAssistantEmbeddings(Embeddings):
         - 429 + quota/billing/free-tier        -> EmbeddingQuotaError (额度/计费)
         - 429 + rate limit / too many requests -> EmbeddingRateLimitError (限流)
         - 其它 429                             -> EmbeddingRateLimitError (保守，不当成配额)
+        - 401 / 403 鉴权                      -> EmbeddingAuthError (API Key / 凭证)
+        - 400 请求参数错误                    -> EmbeddingBadRequestError (模型/参数配置)
         - 5xx / 超时 / 连接错误                -> EmbeddingServiceUnavailableError (服务错误)
         """
         status = getattr(exc, 'status_code', None)
@@ -140,6 +154,15 @@ class AIAssistantEmbeddings(Embeddings):
                     or 'rate limit' in text or 'too many requests' in text):
                 return EmbeddingRateLimitError(str(exc))
             return EmbeddingRateLimitError(str(exc))
+
+        # 401/403：Provider 鉴权失败（API Key / 凭证问题），属配置错误而非可重试的临时故障
+        if status in (401, 403) or any(k in text for k in
+                                       ('authentication', 'unauthorized', 'api key', 'permission', 'forbidden')):
+            return EmbeddingAuthError(str(exc))
+
+        # 400：请求参数错误（如模型不存在 / 不支持的参数），属配置错误而非服务不可用
+        if status == 400 or '400' in text or 'bad request' in text:
+            return EmbeddingBadRequestError(str(exc))
 
         return EmbeddingServiceUnavailableError(str(exc))
 
