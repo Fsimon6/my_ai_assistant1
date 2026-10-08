@@ -17,6 +17,7 @@ import os
 import re
 import json
 import logging
+import threading
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple, AsyncGenerator
@@ -340,6 +341,24 @@ def _json_safe(v: Any) -> Any:
 
 
 # ----------------------------- SQL 安全校验 -----------------------------
+def _wrap_with_limit(sql: str, max_rows: int):
+    """把查询包成 ``SELECT * FROM (<sql>) LIMIT (max_rows+1)`` 的哨兵包裹。
+
+    仅当顶层是 SELECT/UNION 这类查询表达式时安全：GROUP BY / ORDER BY / UNION /
+    子查询 / 聚合都保留在子查询内部，只在外层追加一个 LIMIT，不会破坏任何既有语义。
+    WITH/CTE、VALUES、以括号开头的表达式无法安全包裹，返回 ``None``
+    （调用方改用 fetchmany 哨兵做返回上限保护）。
+    """
+    s = sql.strip()
+    if s.endswith(";"):
+        s = s[:-1].strip()
+    up = s.upper()
+    # 顶层必须是 SELECT（含 UNION 串联的 SELECT）；WITH/CTE 不能包裹
+    if not up.startswith("SELECT"):
+        return None
+    return f'SELECT * FROM ({s}) AS __tq_cap LIMIT {max_rows + 1}'
+
+
 def validate_sql(sql: str, allowed: List[str]) -> None:
     s = sql.strip()
     if s.endswith(";"):
@@ -536,29 +555,75 @@ class TableQueryService:
         return _extract_sql_json(resp)
 
     # ---- 执行 + 受控兜底 ----
-    def _execute_with_fallback(self, sql: str) -> Tuple[List[str], List[tuple], str]:
-        cur = self.engine.con.execute(sql)
-        cols = [d[0] for d in cur.description] if cur.description else []
-        rows = cur.fetchall()
+    def _execute_sql(self, sql: str, cap_rows: bool = True):
+        """执行单条 SQL，带超时保护（watchdog 线程 + con.interrupt）与可选的服务端行数上限。
+
+        返回 ``(cols, rows, truncated)``：
+        - ``truncated=True`` 表示原始结果超过 ``SQL_MAX_RESULT_ROWS`` 安全上限，已被截断。
+        - 超时：触发 ``con.interrupt()`` 取消查询；DuckDB 单例连接可继续复用，
+          不会留下仍在执行的查询，也不会污染下一次 Table QA；
+          并以 ``ValueError`` 明确上抛，供上层识别为错误（绝不静默继续）。
+        """
+        con = self.engine.con
+        timeout = settings.SQL_QUERY_TIMEOUT
+        done = threading.Event()
+        watch = None
+        if timeout and timeout > 0:
+            def _watch() -> None:
+                if not done.wait(timeout):
+                    try:
+                        con.interrupt()
+                    except Exception:  # noqa: BLE001
+                        pass
+            watch = threading.Thread(target=_watch, daemon=True)
+            watch.start()
+        try:
+            wrapped = _wrap_with_limit(sql, settings.SQL_MAX_RESULT_ROWS) if cap_rows else sql
+            sentinel = settings.SQL_MAX_RESULT_ROWS + 1
+            if wrapped is not None:
+                cur = con.execute(wrapped)
+                cols = [d[0] for d in cur.description] if cur.description else []
+                rows = cur.fetchall()
+                if len(rows) >= sentinel:
+                    # 命中哨兵 -> 原始结果超过安全上限，截断并标记
+                    return cols, rows[: settings.SQL_MAX_RESULT_ROWS], True
+                return cols, rows, False
+            # 无法包裹（WITH/CTE 等）：以 fetchmany 哨兵做返回上限保护
+            cur = con.execute(sql)
+            cols = [d[0] for d in cur.description] if cur.description else []
+            first = cur.fetchmany(sentinel)
+            if len(first) >= sentinel:
+                return cols, list(first)[: settings.SQL_MAX_RESULT_ROWS], True
+            rest = cur.fetchall()
+            return cols, list(first) + list(rest), False
+        except duckdb.InterruptException:
+            raise ValueError(f"SQL 执行超时（超过 {timeout:g} 秒），查询已终止")
+        finally:
+            done.set()
+            if watch is not None:
+                watch.join(timeout=max(timeout, 0) + 5)
+
+    def _execute_with_fallback(self, sql: str) -> Tuple[List[str], List[tuple], str, bool]:
+        cols, rows, truncated = self._execute_sql(sql, cap_rows=True)
         if rows:
-            return cols, rows, "exact"
+            return cols, rows, "exact", truncated
         norm_sql = _rewrite_eq(sql, "normalized")
         if norm_sql != sql:
             try:
-                rows2 = self.engine.con.execute(norm_sql).fetchall()
+                cols, rows2, tr2 = self._execute_sql(norm_sql, cap_rows=True)
                 if rows2:
-                    return cols, rows2, "normalized"
-            except Exception:
+                    return cols, rows2, "normalized", tr2
+            except Exception:  # noqa: BLE001
                 pass
         fuzzy_sql = _rewrite_eq(sql, "fuzzy")
         if fuzzy_sql != sql:
             try:
-                rows3 = self.engine.con.execute(fuzzy_sql).fetchall()
+                cols, rows3, tr3 = self._execute_sql(fuzzy_sql, cap_rows=True)
                 if rows3:
-                    return cols, rows3, "fuzzy"
-            except Exception:
+                    return cols, rows3, "fuzzy", tr3
+            except Exception:  # noqa: BLE001
                 pass
-        return cols, rows, "exact-not-found"
+        return cols, rows, "exact-not-found", truncated
 
     def _derive_sources(self, queried: List[str], cols: List[str], rows: List[tuple]) -> List[Dict[str, Any]]:
         idx = {c: i for i, c in enumerate(cols)}
@@ -650,29 +715,37 @@ class TableQueryService:
                     sql = rewritten
                     queried = list(compatible)
 
-        cols, rows, match_mode = self._execute_with_fallback(sql)
+        cols, rows, match_mode, truncated = self._execute_with_fallback(sql)
         sources = self._derive_sources(queried, cols, rows)
-        return sql, cols, rows, match_mode, sources
+        return sql, cols, rows, match_mode, sources, truncated
 
     # ---- 解释 ----
-    def _explain_prompt(self, question, sql, cols, rows, sources) -> str:
+    def _explain_prompt(self, question, sql, cols, rows, sources, result_limited=False) -> str:
         shown = rows[:100] if rows else []
         table_str = _format_result_table(cols, shown)
         src_str = "; ".join(
             f"《{s.get('filename')}》Sheet《{s.get('sheet_name')}》" for s in sources
         ) or "当前表"
+        note = ""
+        if result_limited:
+            note = (
+                f"\n\n【重要】本次查询结果超过安全上限（最多展示 {settings.SQL_MAX_RESULT_ROWS} 行），"
+                f"当前展示的为前 {len(shown)} 行，并非完整结果；"
+                f"回答时必须明确告知用户“结果因超过安全上限被限制，仅展示部分数据”，"
+                f"绝不能把部分结果说成完整结果。"
+            )
         return (
             f"用户问题：{question}\n"
             f"执行的SQL：{sql}\n"
             f"数据来源：{src_str}\n"
             f"查询结果（共{len(rows) if rows is not None else 0}行，以下展示前{len(shown)}行）：\n"
-            f"{table_str}\n\n"
+            f"{table_str}\n{note}\n\n"
             "请用简体中文回答用户，说明关键数字与结论，并说明数据来源文件与Sheet；"
             "如果结果为空，明确告知未找到匹配数据。"
         )
 
-    async def _explain_text(self, question, sql, cols, rows, sources) -> str:
-        prompt = self._explain_prompt(question, sql, cols, rows, sources)
+    async def _explain_text(self, question, sql, cols, rows, sources, result_limited=False) -> str:
+        prompt = self._explain_prompt(question, sql, cols, rows, sources, result_limited)
         llm = _get_llm_explain()
         out = ""
         async for t in llm.chat_completion(
@@ -683,8 +756,8 @@ class TableQueryService:
             out += t
         return out
 
-    async def _explain_stream(self, question, sql, cols, rows, sources) -> AsyncGenerator[str, None]:
-        prompt = self._explain_prompt(question, sql, cols, rows, sources)
+    async def _explain_stream(self, question, sql, cols, rows, sources, result_limited=False) -> AsyncGenerator[str, None]:
+        prompt = self._explain_prompt(question, sql, cols, rows, sources, result_limited)
         llm = _get_llm_explain()
         async for t in llm.chat_completion(
             [{"role": "system", "content": "你是数据分析助手"},
@@ -695,22 +768,24 @@ class TableQueryService:
 
     # ---- 对外接口 ----
     async def run_query(self, user_id: Any, question: str, document_id: Optional[str] = None) -> Dict[str, Any]:
-        sql, cols, rows, match_mode, sources = await self._pipeline(user_id, question, document_id)
-        explanation = await self._explain_text(question, sql, cols, rows, sources)
+        sql, cols, rows, match_mode, sources, truncated = await self._pipeline(user_id, question, document_id)
+        explanation = await self._explain_text(question, sql, cols, rows, sources, truncated)
         return {
             "sql": sql, "match_mode": match_mode, "columns": cols,
             "rows": [_json_safe(list(r)) for r in rows],
             "explanation": explanation, "sources": sources,
+            "result_limited": truncated,
         }
 
     async def stream_query(self, user_id: Any, question: str, document_id: Optional[str] = None) -> AsyncGenerator[str, None]:
-        sql, cols, rows, match_mode, sources = await self._pipeline(user_id, question, document_id)
-        async for text in self._explain_stream(question, sql, cols, rows, sources):
+        sql, cols, rows, match_mode, sources, truncated = await self._pipeline(user_id, question, document_id)
+        async for text in self._explain_stream(question, sql, cols, rows, sources, truncated):
             yield json.dumps(
                 {"type": "chunk", "content": text, "timestamp": datetime.now().isoformat()}
             ) + "\n"
         yield json.dumps({
             "type": "complete", "content": "", "sql": sql, "match_mode": match_mode,
             "row_count": len(rows or []), "sources": sources,
+            "result_limited": truncated,
             "timestamp": datetime.now().isoformat(),
         }) + "\n"

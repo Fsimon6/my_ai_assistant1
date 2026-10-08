@@ -75,6 +75,15 @@ class Settings(BaseSettings):
     # 20 仅为初始阈值、非最终产品规范；超过则回退普通 semantic top-k（大表属 Phase 2）。
     TABLE_FULL_LOAD_MAX_ROW_GROUPS: int = 20
 
+    # Phase 2（PRECISE_QUERY / DuckDB）安全加固：仅作用于精确查询路径，
+    # 不影响 STRUCTURED_ACCESS（Phase 1 全量原始行）/ Chroma / 其他路由。
+    # SQL 执行超时（秒）：DuckDB 为单例内存连接，使用独立 watchdog 线程 + con.interrupt()
+    # 取消；超时后连接可继续复用，不会留下仍在执行的查询，也不会污染下一次 Table QA。
+    SQL_QUERY_TIMEOUT: float = 30.0
+    # SQL 结果最大返回行数（服务端保护）：仅作用于 PRECISE_QUERY 路径。
+    # 超限时明确返回“结果被限制”状态，绝不静默截断并谎称完整结果。
+    SQL_MAX_RESULT_ROWS: int = 2000
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

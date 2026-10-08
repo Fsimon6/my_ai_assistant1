@@ -371,6 +371,7 @@ class TableQAService:
             "columns": res.get("columns"),
             "rows": res.get("rows"),
             "explanation": res.get("explanation"),
+            "result_limited": res.get("result_limited", False),
             "sources": self._normalize_sources(res.get("sources"), res.get("match_mode")),
         }
 
