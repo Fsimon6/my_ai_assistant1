@@ -106,6 +106,12 @@ _BIZ_DEFAULT_PAT = re.compile(
     re.IGNORECASE,
 )
 
+# 中文自然计数表述：「几 + 量词」（几单/几条/几个/几笔/几行/…）。
+# 用于把“筛选 + 计数”类问题稳定路由到 PRECISE_QUERY。
+# 设计约束：(1) 不把裸「几」当 count，避免“为什么/怎么”等误判；
+#           (2) 负向 lookahead (?!意思) 排除“几个意思”等语义问题。
+_JI_COUNT_PAT = re.compile(r"几[单条个笔行列种项件份页块批](?!意思)", re.IGNORECASE)
+
 # 跨文档联合聚合（当前不支持）
 _CROSS_DOC_PAT = re.compile(
     r"所有(文件|文档|Excel|表格|表)|全部(文件|文档|Excel|表格)|加起来|"
@@ -166,7 +172,7 @@ class TableQAService:
 
         # 3) STRUCTURED_ACCESS（复用 Phase 1 现有 _detect_structured_intent，
         #    但“计数问题”明确归 PRECISE，避免“一共有多少个 SKU”误判为枚举）
-        is_count = bool(_COUNT_PAT.search(q))
+        is_count = bool(_COUNT_PAT.search(q) or _JI_COUNT_PAT.search(q))
         struct_intent = RagService._detect_structured_intent(q)
         if struct_intent is not None and not is_count:
             return RouteDecision(
