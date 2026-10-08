@@ -398,6 +398,25 @@ def _parse_referenced_tables(sql: str, allowed: List[str]) -> List[str]:
     return seen
 
 
+# ----------------------------- 语义值解析（schema-aware，确定性） -----------------------------
+class ValueResolutionAmbiguous(ValueError):
+    """等值过滤字面量同时匹配多个候选枚举值，需用户澄清（不擅自猜测）。"""
+
+
+def _norm_value(v: Any) -> str:
+    """归一化枚举值：去首尾空格、折叠内部空白、转小写，用于确定性与缩写匹配。"""
+    return re.sub(r"\s+", " ", str(v).strip().lower())
+
+
+# 匹配等值比较右操作数：支持 `= 'X'` 与 `= LOWER(TRIM('X'))` 两种 NL2SQL 常见写法。
+# 负向后顾 `(?<![<>=!])` 排除 `>=` / `<=` / `!=` / `==`，避免误伤比较/不等运算符。
+# 仅捕获字面量内容；匹配到唯一候选时整段替换为 `= '候选值'`（候选为存储原值，精确匹配即可）。
+_EQ_LITERAL = re.compile(
+    r"(?<![<>=!])=(?:\s*LOWER\(\s*TRIM\()?\s*'((?:[^']|'')*)'\s*\)?\s*",
+    re.IGNORECASE,
+)
+
+
 def _parse_referenced_columns(sql: str) -> List[str]:
     """提取 SQL 中以双引号包裹的业务列名（排除 __ 源列）。"""
     cols = re.findall(r'"([^"]+)"', sql)
@@ -603,6 +622,61 @@ class TableQueryService:
             if watch is not None:
                 watch.join(timeout=max(timeout, 0) + 5)
 
+    # ---- 语义值解析：把自然语言简称/缩写映射到表中真实枚举值 ----
+    def _value_candidates(self, literal: str, ref_tables: List[str]) -> List[str]:
+        """在允许访问的引用表（user/document 隔离内）的低基数 VARCHAR 列中，
+        找出与字面量匹配的候选枚举值（确定性，不调用 LLM）。
+
+        匹配规则（归一化后）：
+        - 完全相等；或
+        - 候选以 `字面量 + 空格` 开头（缩写形式，如 'sf' -> 'sf international'）；或
+        - 字面量是候选的某个 token（如 'sf' -> 'sf international'）。
+        仅扫描 column_examples 返回的列（distinct <= 30），避免把高基数列
+        （SKU / tracking / order id 等）全量拉入解析。
+        """
+        nlit = _norm_value(literal)
+        if not nlit:
+            return []
+        cands: set = set()
+        for t in ref_tables:
+            meta = self.engine.table_meta.get(t)
+            if not meta:
+                continue
+            for c in meta["columns"]:
+                if c["type"] != "VARCHAR":
+                    continue
+                ex = self.engine.column_examples(t, c["name"])
+                if not ex:
+                    continue  # 高基数或出错 -> 跳过，不解析
+                for dv in json.loads(ex):
+                    nd = _norm_value(dv)
+                    if nd == nlit or nd.startswith(nlit + " ") or nlit in nd.split(" "):
+                        cands.add(dv)
+        return list(cands)
+
+    def _resolve_sql_values(self, sql: str, ref_tables: List[str]) -> str:
+        """对 SQL 中等值过滤的字面量做 schema-aware 值解析。
+
+        - 唯一候选 -> 改写为真实存储值（精确匹配，绕过 LLM 的缩写盲区）。
+        - 多个候选 -> 抛出 ValueResolutionAmbiguous（交由上层转 AMBIGUOUS 澄清）。
+        - 无候选 -> 保持原样（不强行映射；查询可能自然返回空，由解释层告知未找到）。
+
+        candidate 仅来自 ref_tables（当前 user/document 允许访问的表），不跨用户/文档。
+        """
+        def repl(m: "re.Match") -> str:
+            lit = m.group(1)
+            cands = self._value_candidates(lit, ref_tables)
+            if len(cands) == 1:
+                val = cands[0].replace("'", "''")
+                return f"= '{val}'"
+            if len(cands) > 1:
+                raise ValueResolutionAmbiguous(
+                    f"值『{lit}』匹配到多个候选：{sorted(cands)}，请明确指定具体值。"
+                )
+            return m.group(0)
+
+        return _EQ_LITERAL.sub(repl, sql)
+
     def _execute_with_fallback(self, sql: str) -> Tuple[List[str], List[tuple], str, bool]:
         cols, rows, truncated = self._execute_sql(sql, cap_rows=True)
         if rows:
@@ -714,6 +788,10 @@ class TableQueryService:
                     validate_sql(rewritten, allowed)  # 二次安全校验：仅引用 allowed 内表
                     sql = rewritten
                     queried = list(compatible)
+
+        # schema-aware 值解析：把自然语言简称/缩写映射到表中真实枚举值
+        # （仅改写等值过滤字面量；多候选交由上层澄清，无候选保持原样）。
+        sql = self._resolve_sql_values(sql, queried)
 
         cols, rows, match_mode, truncated = self._execute_with_fallback(sql)
         sources = self._derive_sources(queried, cols, rows)

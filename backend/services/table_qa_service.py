@@ -33,7 +33,7 @@ from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from backend.services.rag_service import get_rag_service, RagService
-from backend.services.table_query_service import TableQueryService
+from backend.services.table_query_service import TableQueryService, ValueResolutionAmbiguous
 from backend.services.table_representation import load_representation
 
 logger = logging.getLogger(__name__)
@@ -322,6 +322,12 @@ class TableQAService:
                     continue
                 obj.update(base)
                 yield json.dumps(obj) + "\n"
+        except ValueResolutionAmbiguous as e:
+            yield json.dumps({**base, "type": "error", "route": Intent.AMBIGUOUS.value,
+                              "intent": Intent.AMBIGUOUS.value,
+                              "error_type": ErrorType.AMBIGUOUS_NEED_CLARIFICATION.value,
+                              "message": str(e), "timestamp": ts()}) + "\n"
+            return
         except ValueError as e:
             if "没有可查询的表格文档" in str(e):
                 yield json.dumps({**base, "type": "error",
@@ -376,6 +382,11 @@ class TableQAService:
             res = await self.tq.run_query(
                 user_id=user_id, question=question, document_id=document_id,
             )
+        except ValueResolutionAmbiguous as e:
+            return {**base, "execute": False, "route": Intent.AMBIGUOUS.value,
+                    "intent": Intent.AMBIGUOUS.value, "chain": "Phase2-ValueResolution",
+                    "error_type": ErrorType.AMBIGUOUS_NEED_CLARIFICATION.value,
+                    "answer": str(e), "sources": []}
         except ValueError as e:
             if "没有可查询的表格文档" in str(e):
                 return {**base, "execute": True, "chain": "Phase2-DuckDB",
