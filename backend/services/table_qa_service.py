@@ -17,7 +17,9 @@ Intent 边界（关键）：
 - STRUCTURED_.. : 全量枚举/前N/后N/中间范围/精确值查找（复用 Phase 1 现有
                   _detect_structured_intent）。STRUCTURED 优先于 PRECISE，但
                   "多少个/总和/平均/最高" 等【计数问题】明确归 PRECISE（COUNT/聚合），
-                  不误判为枚举。
+                  不误判为枚举；且"排序/Top-N/极值"（排序/降序/升序/从高到低/
+                  从低到高/最高/最低/最大/最小/排名前/TopN）明确归 PRECISE（需
+                  DuckDB 数值排序），优先级高于 STRUCTURED_ACCESS。
 - PRECISE_QUERY : 聚合/计算/筛选/排序/计数（路由到 Phase 2 DuckDB NL2SQL）。
 - AMBIGUOUS     : 无法规则判定（LOW），返回澄清，不盲目执行。
 - UNSUPPORTED   : 跨文档联合聚合（Phase 2 当前单表，不支持）。
@@ -125,6 +127,16 @@ _EXPLICIT_MEASURE = re.compile(
     re.IGNORECASE,
 )
 
+# 明确排序 / Top-N / 极值（数值排序 / 排名 / 前N排序）：
+# 这些无法由 STRUCTURED_ACCESS 的“原始顺序枚举”完成，必须走 PRECISE_QUERY（DuckDB）。
+# 优先级高于 STRUCTURED_ACCESS，但低于 SEMANTIC 含义 / SCHEMA。
+# 注意：仅捕获“排序/排名/极值”语义，不覆盖纯全量枚举（如“全部 SKU 提取”不含下列词）。
+_SORT_TOPN_PAT = re.compile(
+    r"排序|降序|升序|从高到低|从低到高|"
+    r"最高|最低|最大|最小|排名前|Top\s*\d+",
+    re.IGNORECASE,
+)
+
 
 class TableQAService:
     """统一 Table QA 调度层（Phase 1 / Phase 2 的只读编排者）。"""
@@ -168,6 +180,16 @@ class TableQAService:
             return RouteDecision(
                 Intent.SCHEMA, Confidence.HIGH,
                 "结构/字段类问题 -> Phase 1 schema retrieval",
+            )
+
+        # 2.5) 排序 / Top-N / 极值 -> PRECISE（DuckDB 数值排序/排名）
+        # 优先级高于 STRUCTURED_ACCESS：此类表达需要聚合/排序计算，复用 Phase 1 的
+        # 原始顺序枚举无法完成数值排序（如“按 Quantity 从高到低排列前 10 条”）。
+        # 纯全量枚举（“全部 SKU 提取”）不含下列词，仍走 STRUCTURED_ACCESS。
+        if _SORT_TOPN_PAT.search(q):
+            return RouteDecision(
+                Intent.PRECISE_QUERY, Confidence.HIGH,
+                "排序/Top-N/极值 -> 需 DuckDB 数值排序，Phase 2 PRECISE_QUERY",
             )
 
         # 3) STRUCTURED_ACCESS（复用 Phase 1 现有 _detect_structured_intent，
