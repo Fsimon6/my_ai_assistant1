@@ -84,6 +84,14 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时
     logger.info(' AI助手启动中...')
+    # 启动期 fail-fast：模型必需配置（LLM_PROVIDER / API_KEY / LLM_MODEL /
+    # EMBEDDING_MODEL）缺失或为空字符串时，在应用正式接收请求前显式失败，
+    # 避免首次 Chat / RAG / Embedding 请求才暴露问题，也避免静默落到历史默认模型。
+    # 测试环境（pytest）跳过：测试以 mock 隔离 LLM，不要求真实模型配置，
+    # 与 TestingConfig 不调用 validate_required 的设计一致；本轮不接入
+    # ProductionConfig / DevelopmentConfig 等历史配置体系。
+    if 'pytest' not in sys.modules:
+        settings.validate_required()
     # 配置校验失败必须冒泡，禁止静默吞掉（JWT_SECRET 等必填项缺失即启动失败）
     Config.validate_config()
 
