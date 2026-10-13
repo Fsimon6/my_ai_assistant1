@@ -31,6 +31,12 @@
           </el-icon>
           导出
         </el-button>
+        <el-button type="text" @click="showKnowledgeBase">
+          <el-icon>
+            <Folder/>
+          </el-icon>
+          知识库
+        </el-button>
         <el-dropdown @command="handleToolCommand">
           <el-button type="text">
             <el-icon>
@@ -64,16 +70,6 @@
               <el-icon><Check /></el-icon>
               知识库已启用
             </el-tag>
-
-            <el-button
-              type="text"
-              size="small"
-              @click="showKnowledgeBase"
-              class="menage-btn"
-            >
-              <el-idcon><Folder /></el-idcon>
-              管理知识库
-            </el-button>
 
             <el-tooltip content="当前对话将基于您上传的文档进行智能回答" placeholder="top">
               <el-icon class="info-icon"><InfoFilled /></el-icon>
@@ -278,7 +274,7 @@ import {
   MagicStick,
   Promotion,
   Refresh,
-  ChatLineRound, InfoFilled
+  ChatLineRound, InfoFilled, Folder
 } from "@element-plus/icons-vue";
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -937,6 +933,8 @@ watch(messages, () => {
   .toolbar-right {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    row-gap: 4px;
     gap: 8px;
   }
 }
