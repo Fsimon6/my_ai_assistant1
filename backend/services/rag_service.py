@@ -74,6 +74,7 @@ class RagService:
         original_filename: 用户上传的原始文件名，写入 metadata 供文档列表/引用展示（覆盖临时文件名）。
         file_size: 文件字节大小，写入 metadata 供文档列表展示。
         """
+        document_id = None  # 初始化，确保 CancelledError 取消路径引用安全（不触发 NameError）
         try:
             # 表格类文档走独立 Table Representation 路径（不影响既有 TXT/MD/DOCX 文本链路）
             ext = Path(file_path).suffix.lower()
@@ -85,7 +86,9 @@ class RagService:
             # 处理文档（文本）
             from backend.services.document_service import DocumentProcessor
             processor = DocumentProcessor()
+            parse_done = False
             chunks = processor.process_file(file_path)
+            parse_done = True  # 解析成功，后续异常归因为存储/写入阶段
 
             # 生成单文档级 id（覆盖本次上传的所有 chunk，用于“文档 → 向量”生命周期管理）
             document_id = uuid.uuid4().hex
@@ -147,28 +150,56 @@ class RagService:
                 logger.warning(f'取消时清理向量失败（忽略）：{ce}')
             raise
         except Exception as e:
-            logger.error(f'处理存储文档失败：{e}')
+            # 记录完整 traceback（含 filename），但仅向调用方返回结构化错误，绝不泄露原始异常/路径。
+            logger.exception(
+                f'Upload failed: filename={original_filename or os.path.basename(file_path)} '
+                f'error_type={RagService._classify_upload_error_type(e, parse_done)}'
+            )
             # 失败清理：embedding/向量写入失败时在成功落盘的文件即为半成品，需删除避免孤儿文件
             try:
                 if os.path.exists(file_path):
                     os.remove(file_path)
             except OSError as oe:
                 logger.debug(f'清理失败临时文件出错：{file_path}, {oe}')
-            # 友好错误分类：embedding 类异常返回结构化 error_type + 用户提示，
-            # 不暴露 API Key / 原始响应细节；普通文档与 Excel 共用同一路径。
-            if isinstance(e, EmbeddingError):
-                return {
-                    'success': False,
-                    'error_type': e.error_type,
-                    'error_message': e.user_message,
-                    'error': str(e),  # 仅后端诊断用，前端不展示
-                    'filename': os.path.basename(file_path),
-                }
+            # 统一结构化错误：按 EmbeddingError / 解析 / 存储 / 未知 分类，返回 error_type + 友好提示。
+            return RagService._build_upload_error(e, file_path, parse_done)
+
+    @staticmethod
+    def _classify_upload_error_type(e: Exception, parse_done: bool) -> str:
+        """上传失败分类：embedding 优先；解析阶段失败 -> DOCUMENT_PARSE_ERROR；其余 -> STORAGE_ERROR。"""
+        if isinstance(e, EmbeddingError):
+            return e.error_type
+        if not parse_done:
+            return 'DOCUMENT_PARSE_ERROR'
+        return 'STORAGE_ERROR'
+
+    @staticmethod
+    def _build_upload_error(e: Exception, file_path: str, parse_done: bool) -> Dict[str, Any]:
+        """构造统一上传失败返回（结构化，不含原始异常字符串）。
+
+        仅返回 error_type + 用户可读 error_message；完整 traceback 已在日志中保留。
+        """
+        filename = os.path.basename(file_path or '')
+        if isinstance(e, EmbeddingError):
             return {
                 'success': False,
-                'error': str(e),
-                'filename': os.path.basename(file_path)
+                'error_type': e.error_type,
+                'error_message': e.user_message,
+                'filename': filename,
             }
+        if not parse_done:
+            return {
+                'success': False,
+                'error_type': 'DOCUMENT_PARSE_ERROR',
+                'error_message': '文档解析失败，请检查文件是否损坏或格式是否正确。',
+                'filename': filename,
+            }
+        return {
+            'success': False,
+            'error_type': 'STORAGE_ERROR',
+            'error_message': '向量库写入失败，请稍后重试。',
+            'filename': filename,
+        }
 
     async def _process_and_store_table(
         self,
@@ -191,6 +222,7 @@ class RagService:
         document_id = uuid.uuid4().hex
         ext = Path(file_path).suffix.lower()
         original_path: Optional[str] = None
+        parse_done = False
         try:
             # 实际用于本次索引的 embedding 模型（与 add_documents 保持一致），并记录进 Representation
             effective_embedding_model = embedding_model or settings.EMBEDDING_MODEL
@@ -207,6 +239,7 @@ class RagService:
             )
             # §21 校验：原始列数 vs Representation 列数，防止异常 Excel 静默丢列
             validate_representation(original_path, rep)
+            parse_done = True  # 解析成功，后续异常归因为存储/写入阶段
 
             # 3) 落盘 Representation
             save_representation_json(rep)
@@ -244,10 +277,14 @@ class RagService:
             RagService._rollback_table_upload(document_id, original_path, file_path, user_id)
             raise  # 原始取消继续向上抛出（由 ASGI 层正常终止请求）
         except Exception as e:
-            # ---- 失败回滚：仅清理本次上传 document_id 的产物，绝不波及历史/其他用户 ----
-            logger.error(f'表格文档处理失败，回滚本次产物：{e}')
+            # 记录完整 traceback，然后回滚本次产物（仅限本次 document_id，绝不波及历史/其他用户），
+            # 并构造统一结构化错误返回（不再向上抛出裸异常，与文本路径错误结构保持一致）。
+            logger.exception(
+                f'Upload failed: filename={original_filename or os.path.basename(file_path or "")} '
+                f'error_type={RagService._classify_upload_error_type(e, parse_done)}'
+            )
             RagService._rollback_table_upload(document_id, original_path, file_path, user_id)
-            raise  # 原始异常继续向上抛出（upload API 据此返回失败）
+            return RagService._build_upload_error(e, file_path or original_path or '', parse_done)
 
     @staticmethod
     def _rollback_table_upload(

@@ -17,13 +17,29 @@ from backend.services.conversation_service import conversation_service
 router = APIRouter(prefix='/api/v1/rag', tags=['RAG'])
 logger = logging.getLogger(__name__)
 
-# Embedding 错误类型 -> HTTP 状态（语义化，便于前端/监控区分配置类与服务类故障）
-_EMBEDDING_ERROR_STATUS = {
+# 上传错误类型 -> HTTP 状态（语义化，便于前端/监控区分配置类与服务类故障）
+_UPLOAD_ERROR_STATUS = {
     'EMBEDDING_QUOTA_EXCEEDED': 429,
     'EMBEDDING_RATE_LIMITED': 429,
     'EMBEDDING_AUTH_ERROR': 502,
     'EMBEDDING_BAD_REQUEST': 502,
     'EMBEDDING_SERVICE_ERROR': 503,
+    'EMBEDDING_DIMENSION_MISMATCH': 503,
+    'DOCUMENT_PARSE_ERROR': 400,
+    'STORAGE_ERROR': 503,
+    'UNKNOWN_ERROR': 500,
+}
+# 各错误类型用户可读提示（detail 未携带 message 时的兜底，绝不泄露原始异常/路径/密钥）
+_UPLOAD_ERROR_FALLBACK_MESSAGE = {
+    'EMBEDDING_QUOTA_EXCEEDED': 'Embedding 服务额度不足，请检查配额/计费状态。',
+    'EMBEDDING_RATE_LIMITED': 'Embedding 请求过于频繁，请稍后重试。',
+    'EMBEDDING_AUTH_ERROR': 'Embedding 服务鉴权失败，请检查 Provider API Key / 凭证配置。',
+    'EMBEDDING_BAD_REQUEST': 'Embedding 请求参数错误，请检查 Provider 模型与参数配置。',
+    'EMBEDDING_SERVICE_ERROR': 'Embedding 服务暂时不可用，请稍后重试。',
+    'EMBEDDING_DIMENSION_MISMATCH': 'Embedding 模型维度与已有向量集合不一致，请使用原 embedding 模型或重建向量集合。',
+    'DOCUMENT_PARSE_ERROR': '文档解析失败，请检查文件是否损坏或格式是否正确。',
+    'STORAGE_ERROR': '向量库写入失败，请稍后重试。',
+    'UNKNOWN_ERROR': '文档处理失败，请稍后重试。',
 }
 
 
@@ -54,6 +70,7 @@ async def upload_document(
     current_user: User = Depends(get_current_active_user)
 ):
     """上传并处理文档（需登录；文档归属当前用户）"""
+    original_filename = None  # 失败兜底日志用，避免未预期异常时 NameError
     try:
         rag_service = get_rag_service()
 
@@ -83,7 +100,7 @@ async def upload_document(
         if metadata:
             try:
                 parsed_metadata = json.loads(metadata)
-            except:
+            except Exception:
                 parsed_metadata = {'custom_metadata': metadata}
 
         # 处理文档（归属当前用户，用于向量隔离）
@@ -106,32 +123,30 @@ async def upload_document(
                 'total_chunks': result['total_chunks'],
             }
         else:
-            # 友好错误：embedding 类失败已携带 error_type/error_message，返回明确状态 + 提示
-            # （不暴露 API Key / 原始响应细节）。quota/rate-limit 用 429，服务错误用 503。
-            error_type = result.get('error_type')
-            if error_type:
-                # 不同 embedding 错误映射到语义正确的 HTTP 状态：
-                # quota/rate -> 429；auth/请求参数(配置类) -> 502；其余服务错误 -> 503。
-                status_code = _EMBEDDING_ERROR_STATUS.get(error_type, 503)
-                raise HTTPException(
-                    status_code=status_code,
-                    detail={
-                        'error_type': error_type,
-                        'message': result.get('error_message') or '文档处理失败，请稍后重试。',
-                    },
-                )
+            # 统一结构化错误：返回 {error_type, message}，绝不把原始异常/路径/密钥暴露给前端。
+            # rag_service 已按 EmbeddingError / 解析 / 存储 / 未知 分类；此处仅做 HTTP 状态映射。
+            error_type = result.get('error_type') or 'UNKNOWN_ERROR'
+            message = (
+                result.get('error_message')
+                or _UPLOAD_ERROR_FALLBACK_MESSAGE.get(error_type, '文档处理失败，请稍后重试。')
+            )
+            status_code = _UPLOAD_ERROR_STATUS.get(error_type, 500)
             raise HTTPException(
-                status_code=500,
-                detail=f'文档处理失败：{result.get("error")}'
+                status_code=status_code,
+                detail={'error_type': error_type, 'message': message},
             )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f'上传文档失败：{e}')
+        # 未预期异常：记录完整 traceback（含 filename），但返回结构化错误，不泄露原始异常细节
+        logger.exception(f'上传文档失败（未预期异常）：filename={original_filename}')
         raise HTTPException(
             status_code=500,
-            detail=f'上传文档失败：{str(e)}'
+            detail={
+                'error_type': 'UNKNOWN_ERROR',
+                'message': '文档处理失败，请稍后重试。',
+            },
         )
 
 

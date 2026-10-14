@@ -54,26 +54,34 @@ request.interceptors.response.use(
 
     if (error.response) {
       const {status, data} = error.response
+      // 结构化错误：detail 含 {error_type, message}。优先 message，其次 error_type，最后中文兜底；
+      // 绝不展示原始 Python 异常（路径/堆栈/密钥）。有结构化 detail 时由具体调用方的本地处理
+      // （如上传）展示精确提示，全局拦截器不再重复弹窗。
+      const detail = data?.detail
+      const hasStructured = !!(detail && (detail.error_type || detail.message))
+      const friendly = data?.message || (detail && detail.message)
+
+      const showMsg = (m: string) => ElMessage.error(m)
 
       switch (status) {
         case 401:
-          ElMessage.error('登录已过期， 请重新登录')
+          showMsg('登录已过期， 请重新登录')
 
           localStorage.removeItem('access_token')
           localStorage.removeItem('user_info')
           router.push('/login')
           break
         case 403:
-          ElMessage.error('没有权限访问')
+          showMsg('没有权限访问')
           break
         case 404:
-          ElMessage.error('请求的资源不存在')
+          showMsg('请求的资源不存在')
           break
         case 500:
-          ElMessage.error('服务器内部错误')
+          if (!hasStructured) showMsg('服务器内部错误')
           break
         default:
-          ElMessage.error(data?.message || `请求失败${status}`)
+          if (!hasStructured) showMsg(friendly || `请求失败（${status}）`)
       }
     } else if (error.request) {
       ElMessage.error('网络错误，请检查网络连接')

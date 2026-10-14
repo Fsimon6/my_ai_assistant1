@@ -476,26 +476,36 @@ const handleFileUploaded = async (fileData: any) => {
       timestamp: new Date().toISOString()
     })
 
-    // 优先使用后端返回的友好错误（detail 为 {error_type, message}），不再展示原始异常
+    // 后端返回结构化错误 detail={error_type, message}；优先 message，其次按 error_type 给中文，
+    // 最后固定兜底。禁止直接展示原始异常字符串（避免泄露路径/堆栈/密钥）。
     const detail = error?.response?.data?.detail
     let msg = '文件上传失败，请稍后重试'
     if (detail && typeof detail === 'object') {
-      if (detail.error_type === 'EMBEDDING_QUOTA_EXCEEDED') {
+      const t = detail.error_type
+      if (t === 'EMBEDDING_DIMENSION_MISMATCH') {
+        msg = detail.message || '当前 Embedding 模型与已有知识库向量维度不一致，请使用原模型，或重新建立知识库。'
+      } else if (t === 'EMBEDDING_QUOTA_EXCEEDED') {
         msg = detail.message || 'Embedding 服务额度不足，请检查配额/计费状态。'
-      } else if (detail.error_type === 'EMBEDDING_RATE_LIMITED') {
+      } else if (t === 'EMBEDDING_RATE_LIMITED') {
         msg = detail.message || 'Embedding 请求过于频繁，请稍后重试。'
-      } else if (detail.error_type === 'EMBEDDING_SERVICE_ERROR') {
-        msg = detail.message || 'Embedding 服务暂时不可用，请稍后重试。'
-      } else if (detail.error_type === 'EMBEDDING_AUTH_ERROR') {
+      } else if (t === 'EMBEDDING_AUTH_ERROR') {
         msg = detail.message || 'Embedding 服务鉴权失败，请检查 Provider API Key / 凭证配置。'
-      } else if (detail.error_type === 'EMBEDDING_BAD_REQUEST') {
+      } else if (t === 'EMBEDDING_BAD_REQUEST') {
         msg = detail.message || 'Embedding 请求参数错误，请检查 Provider 模型与参数配置。'
-      } else if (typeof detail === 'string') {
-        msg = detail
+      } else if (t === 'EMBEDDING_SERVICE_ERROR') {
+        msg = detail.message || 'Embedding 服务暂时不可用，请稍后重试。'
+      } else if (t === 'DOCUMENT_PARSE_ERROR') {
+        msg = detail.message || '文档解析失败，请检查文件是否损坏或格式是否正确。'
+      } else if (t === 'STORAGE_ERROR') {
+        msg = detail.message || '向量库写入失败，请稍后重试。'
+      } else if (t === 'UNKNOWN_ERROR') {
+        msg = detail.message || '文档处理失败，请稍后重试。'
+      } else if (detail.message) {
+        // 未知 error_type 但后端已给友好 message，直接采用
+        msg = detail.message
       }
-    } else if (typeof detail === 'string') {
-      msg = detail
     }
+    // 注意：若 detail 为字符串（旧格式），不展示原始异常，统一用中文兜底
     ElMessage.error(msg)
   } finally {
     // 无论成功/失败/取消，均释放上传锁
