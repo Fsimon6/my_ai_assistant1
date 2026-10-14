@@ -19,6 +19,12 @@
         </div>
       </div>
       <div class="toolbar-right">
+        <el-button type="primary" plain @click="showKnowledgeBase">
+          <el-icon>
+            <Folder/>
+          </el-icon>
+          知识库
+        </el-button>
         <el-button type="text" @click="clearConversation">
           <el-icon>
             <Delete/>
@@ -31,12 +37,6 @@
           </el-icon>
           导出
         </el-button>
-        <el-button type="text" @click="showKnowledgeBase">
-          <el-icon>
-            <Folder/>
-          </el-icon>
-          知识库
-        </el-button>
         <el-dropdown @command="handleToolCommand">
           <el-button type="text">
             <el-icon>
@@ -47,8 +47,8 @@
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item command="copy">复制对话</el-dropdown-item>
-              <el-dropdown-item command="save">保存模板</el-dropdown-item>
-              <el-dropdown-item command="settings">对话设置</el-dropdown-item>
+              <el-dropdown-item command="save" disabled>保存模板（开发中）</el-dropdown-item>
+              <el-dropdown-item command="settings" disabled>对话设置（开发中）</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -66,7 +66,7 @@
           />
 
           <div class="rag-info" v-if="enableRAG">
-            <el-tag typr="success" size="small">
+            <el-tag type="success" size="small">
               <el-icon><Check /></el-icon>
               知识库已启用
             </el-tag>

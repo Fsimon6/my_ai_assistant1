@@ -27,7 +27,7 @@
               </el-icon>
               <span>AI角色</span>
             </el-menu-item>
-          <el-menu-item index="/chat">
+          <el-menu-item index="/characters">
             <el-icon><ChatDotRound /></el-icon>
             <span>聊天</span>
           </el-menu-item>
