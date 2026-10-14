@@ -115,5 +115,5 @@ async def list_table_documents(
     （document_id=None 时的可查询集合）共用同一枚举逻辑，按 user_id 隔离；
     不依赖 Chroma、不读取其他用户数据、不修改 representation 文件、不新建数据库表。
     """
-    docs = _service.tq.list_user_table_documents(current_user.id)
+    docs = _service.list_user_table_documents(current_user.id)
     return {"success": True, "documents": docs}

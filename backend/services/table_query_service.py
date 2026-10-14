@@ -145,19 +145,24 @@ def _classify_column(col: Dict[str, Any], sample_values: List[Any]) -> Tuple[str
     return "DOUBLE", "numeric-measure"
 
 
-# ----------------------------- DuckDB 引擎（单例 in-memory） -----------------------------
+# ----------------------- DuckDB 引擎（请求级 in-memory，非单例） -----------------------
 class DuckDBTableEngine:
-    _instance = None
+    """每次查询使用的独立 in-memory DuckDB 连接（请求级生命周期）。
+
+    不再使用进程级单例：每个 TableQueryService 实例拥有自己的连接与 table_meta，
+    请求结束即 close()，彻底消除跨请求共享连接 / 中断互相影响 / 内存表残留问题。
+    """
 
     def __init__(self):
         self.con = duckdb.connect(database=":memory:")
         self.table_meta: Dict[str, Dict[str, Any]] = {}
 
-    @classmethod
-    def get(cls) -> "DuckDBTableEngine":
-        if cls._instance is None:
-            cls._instance = DuckDBTableEngine()
-        return cls._instance
+    def close(self) -> None:
+        """关闭底层 DuckDB 连接，释放内存表（请求结束后调用）。"""
+        try:
+            self.con.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _table_name(self, document_id: str, sheet_idx: int) -> str:
         safe = re.sub(r"[^A-Za-z0-9]", "_", str(document_id))
@@ -463,7 +468,17 @@ def _rewrite_eq(sql: str, mode: str) -> str:
 # ----------------------------- 精确查询服务 -----------------------------
 class TableQueryService:
     def __init__(self):
-        self.engine = DuckDBTableEngine.get()
+        # 每实例独占一个 in-memory DuckDB 连接；请求级生命周期由调用方 close()。
+        self.engine = DuckDBTableEngine()
+
+    def close(self) -> None:
+        self.engine.close()
+
+    def __enter__(self) -> "TableQueryService":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     # ---- 数据加载（Representation -> DuckDB） ----
     def _load_user_representations(self, user_id: Any) -> List[Dict[str, Any]]:

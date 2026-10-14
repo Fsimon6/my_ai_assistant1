@@ -177,7 +177,6 @@ def _build_client():
     app.include_router(tq_mod.router)
     app.dependency_overrides[tq_mod.get_current_active_user] = fake_user
     svc = tq_mod._service
-    svc.tq.ensure_user_tables(153)
     return TestClient(app), svc
 
 

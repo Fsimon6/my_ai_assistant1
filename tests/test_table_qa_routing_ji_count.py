@@ -105,16 +105,17 @@ def test_ji_count_enters_phase2_duckdb():
 
 # ---------------- 5) 委托链：run() 对几计数问题调用 Phase 2 ----------------
 def test_ji_count_delegates_to_run_query():
-    svc = TableQAService.__new__(TableQAService)
-    svc.tq = MagicMock()
-    svc.tq.run_query = AsyncMock(return_value={
-        "sql": "SELECT COUNT(*) FROM t", "columns": ["cnt"], "rows": [[0]],
-        "match_mode": "exact", "sources": [], "explanation": "", "result_limited": False,
-    })
+    # 类级 mock run_query：验证 run() 对几计数问题确实委托到 Phase 2 的 run_query
+    # （每请求独立 TableQueryService，故此处 mock 类方法而非 self.tq 实例属性）。
+    with patch.object(TableQueryService, "run_query",
+                     new=AsyncMock(return_value={
+                         "sql": "SELECT COUNT(*) FROM t", "columns": ["cnt"], "rows": [[0]],
+                         "match_mode": "exact", "sources": [], "explanation": "", "result_limited": False,
+                     })) as m:
+        svc = TableQAService()
+        async def _run():
+            return await svc.run(153, "物流商为SF的有几单？")
 
-    async def _run():
-        return await svc.run(153, "物流商为SF的有几单？")
-
-    res = asyncio.run(_run())
-    assert res["route"] == "PRECISE_QUERY"
-    svc.tq.run_query.assert_awaited_once()
+        res = asyncio.run(_run())
+        assert res["route"] == "PRECISE_QUERY"
+        m.assert_awaited_once()

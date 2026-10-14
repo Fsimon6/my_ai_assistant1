@@ -133,9 +133,11 @@ def _build_client():
     app.include_router(tq_mod.router)
     app.dependency_overrides[tq_mod.get_current_active_user] = fake_user
     svc = tq_mod._service
-    svc.tq.ensure_user_tables(153)
-    eng = svc.tq.engine
-    t5 = next(t for t, m in eng.table_meta.items() if "5店" in m["filename"])
+    # 通过一次性引擎发现目标表名（与每请求引擎命名一致），不依赖持久连接
+    _tmp = TableQueryService()
+    _tmp.ensure_user_tables(153)
+    t5 = next(t for t, m in _tmp.engine.table_meta.items() if "5店" in m["filename"])
+    _tmp.close()
     return TestClient(app), t5
 
 

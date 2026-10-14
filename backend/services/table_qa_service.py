@@ -143,7 +143,14 @@ class TableQAService:
 
     def __init__(self):
         self.rag = get_rag_service()
-        self.tq = TableQueryService()
+
+    def list_user_table_documents(self, user_id: Any) -> List[Dict[str, Any]]:
+        # 仅读取 Table Representation 文件，不打开/共享 DuckDB 连接（每次新建独立实例）。
+        tq = TableQueryService()
+        try:
+            return tq.list_user_table_documents(user_id)
+        finally:
+            tq.close()
 
     # =================== 1) Intent Router（确定性规则） ===================
     def classify(self, query: str) -> RouteDecision:
@@ -310,38 +317,42 @@ class TableQAService:
                               "timestamp": ts()}) + "\n"
             return
 
-        # Phase 2 流式：复用冻结的 stream_query，注入 route/intent/confidence
+        # Phase 2 流式：每次请求使用独立的 TableQueryService（独立连接），用后关闭。
+        tq = TableQueryService()
         try:
-            async for frame in self.tq.stream_query(
-                user_id=user_id, question=question, document_id=document_id,
-            ):
-                try:
-                    obj = json.loads(frame)
-                except Exception:  # noqa: BLE001
-                    yield frame
-                    continue
-                obj.update(base)
-                yield json.dumps(obj) + "\n"
-        except ValueResolutionAmbiguous as e:
-            yield json.dumps({**base, "type": "error", "route": Intent.AMBIGUOUS.value,
-                              "intent": Intent.AMBIGUOUS.value,
-                              "error_type": ErrorType.AMBIGUOUS_NEED_CLARIFICATION.value,
-                              "message": str(e), "timestamp": ts()}) + "\n"
-            return
-        except ValueError as e:
-            if "没有可查询的表格文档" in str(e):
-                yield json.dumps({**base, "type": "error",
-                                  "error_type": ErrorType.NO_DOCUMENT.value,
+            try:
+                async for frame in tq.stream_query(
+                    user_id=user_id, question=question, document_id=document_id,
+                ):
+                    try:
+                        obj = json.loads(frame)
+                    except Exception:  # noqa: BLE001
+                        yield frame
+                        continue
+                    obj.update(base)
+                    yield json.dumps(obj) + "\n"
+            except ValueResolutionAmbiguous as e:
+                yield json.dumps({**base, "type": "error", "route": Intent.AMBIGUOUS.value,
+                                  "intent": Intent.AMBIGUOUS.value,
+                                  "error_type": ErrorType.AMBIGUOUS_NEED_CLARIFICATION.value,
                                   "message": str(e), "timestamp": ts()}) + "\n"
-            else:
+                return
+            except ValueError as e:
+                if "没有可查询的表格文档" in str(e):
+                    yield json.dumps({**base, "type": "error",
+                                      "error_type": ErrorType.NO_DOCUMENT.value,
+                                      "message": str(e), "timestamp": ts()}) + "\n"
+                else:
+                    yield json.dumps({**base, "type": "error",
+                                      "error_type": ErrorType.INTERNAL_ERROR.value,
+                                      "message": str(e), "timestamp": ts()}) + "\n"
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Phase2 TableQA 流式失败：{e}")
                 yield json.dumps({**base, "type": "error",
                                   "error_type": ErrorType.INTERNAL_ERROR.value,
                                   "message": str(e), "timestamp": ts()}) + "\n"
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"Phase2 TableQA 流式失败：{e}")
-            yield json.dumps({**base, "type": "error",
-                              "error_type": ErrorType.INTERNAL_ERROR.value,
-                              "message": str(e), "timestamp": ts()}) + "\n"
+        finally:
+            tq.close()
 
     # =================== 3) Phase 1 执行 ===================
     async def _run_phase1(self, dec, user_id, question, document_id, history, base) -> Dict[str, Any]:
@@ -378,8 +389,11 @@ class TableQAService:
 
     # =================== 4) Phase 2 执行 ===================
     async def _run_phase2(self, dec, user_id, question, document_id, base) -> Dict[str, Any]:
+        # 每次请求使用独立的 TableQueryService（独立 DuckDB 连接），用后关闭，
+        # 彻底避免多请求共享连接导致的 interrupt 互相影响 / 内存表残留。
+        tq = TableQueryService()
         try:
-            res = await self.tq.run_query(
+            res = await tq.run_query(
                 user_id=user_id, question=question, document_id=document_id,
             )
         except ValueResolutionAmbiguous as e:
@@ -400,6 +414,8 @@ class TableQAService:
             return {**base, "execute": True, "chain": "Phase2-DuckDB",
                     "error_type": ErrorType.DUCKDB_EXECUTION_FAILED.value,
                     "answer": f"精确查询失败：{e}", "sources": []}
+        finally:
+            tq.close()
 
         return {
             **base, "execute": True,
