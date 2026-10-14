@@ -30,7 +30,7 @@ env = get_env()
 if env == ENV_PRODUCTION:
     from .production import ProductionConfig as Config
 elif env == ENV_TESTING:
-    from .testing import TestConfig as Config
+    from .testing import TestingConfig as Config
 else:   # development
     from .development import DevelopmentConfig as Config
 

@@ -3,9 +3,9 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# 历史兼容 fallback（仅作常量保留，用于测试 / 非生产代码的默认占位）。
-# 注意：它们不再是 pydantic 字段默认值——生产运行必须经过 validate_required() 校验，
-# 缺失即启动失败，绝不静默落到这些历史默认值。
+# Deprecated: 历史兼容 fallback 常量（仅作常量保留，供既有测试断言；运行期不再使用）。
+# 它们不再是 pydantic 字段默认值——生产运行必须经过 validate_required() 校验，
+# 缺失即启动失败，绝不静默落到这些历史默认值。删除需单独评估（现有测试依赖）。
 LEGACY_FALLBACK_LLM_MODEL = "gpt-3.5-turbo"
 LEGACY_FALLBACK_EMBEDDING_MODEL = "text-embedding-3-small"
 
@@ -52,10 +52,10 @@ class Settings(BaseSettings):
 
     # 嵌入模型（EMBEDDING_MODEL 仅用于 Embedding，与 LLM_MODEL（Chat）解耦）；
     # 同样为生产必需，缺失/空字符串即启动失败。
-    EMBEDDING_PROVIDER: str = "local"
+    # 注：EMBEDDING_PROVIDER / EMBEDDING_DIMENSIONS / EMBEDDING_DEVICE 为历史遗留字段，
+    # 运行时代码（embeddings/embedding_service、vector_service）使用各自 EmbeddingConfig，
+    # 并不读取本 Settings 上的这三个字段，已于「配置系统清理第一轮」删除。
     EMBEDDING_MODEL: Optional[str] = None
-    EMBEDDING_DIMENSIONS: int = 512
-    EMBEDDING_DEVICE: str = "cpu"
 
     # CORS
     BACKEND_CORS_ORIGINS: list[str] | str = []
