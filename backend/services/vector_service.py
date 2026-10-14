@@ -352,6 +352,10 @@ class VectorStoreManager:
             f'existing={existing_dim} current={current_dim} model={model}'
         )
         if existing_dim != current_dim:
+            logger.error(
+                f'Embedding dimension mismatch: collection={collection.name} '
+                f'existing={existing_dim} current={current_dim} model={model}'
+            )
             raise EmbeddingDimensionMismatch(
                 f"Embedding dimension mismatch.\n"
                 f"Existing Chroma collection dimension: {existing_dim}\n"
@@ -715,14 +719,30 @@ class VectorStoreManager:
         filter_dict: Optional[Dict] = None,
         embedding_model: str = None,
     ) -> List[SearchResult]:
-        """相似度搜索（按 embedding_model 路由到对应 collection）。"""
+        """相似度搜索（按 embedding_model 路由到对应 collection）。
+
+        查询前先生成 query embedding 并做维度兼容校验：当前 embedding 模型输出的维度
+        必须与既有 Chroma collection 维度一致，否则显式抛 EmbeddingDimensionMismatch，
+        绝不把不同维度的 query vector 丢给 Chroma 让它抛底层维度错误（写入侧复用同一
+        `_check_dimension_compatibility`，不复制校验逻辑）。维度校验通过后，用已生成的
+        query vector 直接查询（等价于 similarity_search_with_relevance_scores，不重复
+        远程 embedding，也不改变 top_k / retrieval strategy / Table-aware Retrieval）。
+        """
         try:
             # 按 embedding_model 路由到目标 collection（其专属 embeddings 用于 query 嵌入）。
             store, emb = self._resolve_store(embedding_model)
-            results = store.similarity_search_with_relevance_scores(
-                query=query,
+
+            # 查询前：生成 query embedding 并校验维度（不与 collection 维度比对失败则抛异常）。
+            query_vector = emb.embed_query(query)
+            self._check_dimension_compatibility(
+                store._collection, len(query_vector), emb.embedding_model)
+
+            # 用已校验维度的 query vector 直接查询（与 similarity_search_with_relevance_scores
+            # 等价，但避免二次远程 embedding，也保证维度不匹配时不会进入 Chroma 查询）。
+            results = store.similarity_search_by_vector_with_relevance_scores(
+                embedding=query_vector,
                 k=k,
-                filter=filter_dict
+                filter=filter_dict,
             )
 
             # 格式化结果

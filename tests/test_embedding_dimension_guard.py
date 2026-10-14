@@ -209,3 +209,56 @@ def test_regression_txt_xlsx_search_and_table_retrieval():
         tbl = m.get_table_row_groups('x1', user_id=1)
         assert len(tbl) == 1, 'XLSX 的 row_group chunk 应可被 Table-aware Retrieval 读取'
         assert tbl[0]['content'] == '销售表 行1'
+
+
+# ---------------------------------------------------------------------------
+# Query-side 维度校验（第二轮）：查询前先校验，维度不一致不进入 Chroma 查询
+# ---------------------------------------------------------------------------
+def test_query_same_dimension_passes():
+    vs.AIAssistantEmbeddings = DimFakeEmbeddings
+    DimFakeEmbeddings.DIM = 1024
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        m = VectorStoreManager(tmp)
+        run(m.add_documents(make_docs('q', 3, 'q.txt')))  # collection = 1024
+        # query 维度 = 1024 == 既有 1024 → 正常返回结果
+        results = run(m.search('q content 0', k=2))
+        assert isinstance(results, list)
+        assert len(results) >= 1
+        assert any('q content 0' in (r.get('content') or '') for r in results)
+
+
+def test_query_dimension_mismatch_does_not_reach_chroma():
+    vs.AIAssistantEmbeddings = DimFakeEmbeddings
+    DimFakeEmbeddings.DIM = 1024
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        m = VectorStoreManager(tmp)
+        run(m.add_documents(make_docs('q', 3, 'q.txt')))  # collection = 1024
+        DimFakeEmbeddings.DIM = 1536  # 模拟 query embedding 维度变化
+        # 若维度校验未被拦截、Chroma 查询仍被执行，则此处会被假 Chroma 查询方法显式失败，
+        # 从而证明「维度不匹配时绝不会进入 Chroma 查询」。
+        m.vector_store.similarity_search_by_vector_with_relevance_scores = MagicMock(
+            side_effect=AssertionError('Chroma query must not be reached on dimension mismatch')
+        )
+        with pytest.raises(EmbeddingDimensionMismatch):
+            run(m.search('q content 0', k=2))
+        # 明确确认 Chroma 查询方法从未被调用（维度校验在查询前已拦截）
+        m.vector_store.similarity_search_by_vector_with_relevance_scores.assert_not_called()
+
+
+def test_query_mismatch_error_message_contains_details():
+    vs.AIAssistantEmbeddings = DimFakeEmbeddings
+    DimFakeEmbeddings.DIM = 1024
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        m = VectorStoreManager(tmp)
+        run(m.add_documents(make_docs('q', 2, 'q.txt')))
+        DimFakeEmbeddings.DIM = 1536
+        with pytest.raises(EmbeddingDimensionMismatch) as exc:
+            run(m.search('q content 0', k=2))
+        msg = str(exc.value)
+        assert '1024' in msg          # existing dimension
+        assert '1536' in msg          # current (query) dimension
+        assert 'dim-model' in msg     # embedding model name
+        # 不得泄露 API Key / Base URL / 完整 embedding
+        assert 'sk-' not in msg
+        assert 'api_key' not in msg.lower()
+        assert 'apikey' not in msg.lower()
