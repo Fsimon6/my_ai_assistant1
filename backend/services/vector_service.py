@@ -57,6 +57,19 @@ class EmbeddingBadRequestError(EmbeddingError):
     user_message = 'Embedding 请求参数错误，请检查 Provider 模型与参数配置（如模型名称/维度）。'
 
 
+class EmbeddingDimensionMismatch(EmbeddingError):
+    """当前 embedding 输出维度与既有 Chroma collection 维度不一致（embedding 模型配置变更导致）。
+
+    属配置错误而非可重试故障：必须显式失败，禁止把不同维度的向量写入同一 collection
+    （Chroma 会拒绝或静默损坏集合）。错误链完整保留，便于 API 层给出明确提示（不泄露
+    API Key / Base URL / 向量内容）。
+    """
+    error_type = 'EMBEDDING_DIMENSION_MISMATCH'
+    user_message = (
+        'Embedding 模型维度与已有向量集合不一致，请使用原 embedding 模型或重建向量集合。'
+    )
+
+
 class ReindexError(Exception):
     """显式 document reindex 业务异常基类。"""
 
@@ -300,6 +313,54 @@ class VectorStoreManager:
         for s in self._custom_stores.values():
             yield s
 
+    def _check_dimension_compatibility(
+        self, collection, current_dim: int, model: str
+    ) -> None:
+        """写入前校验：当前 embedding 维度必须与既有 collection 维度一致。
+
+        仅在「单文档/单批写入」前调用，不在上传接口或 Excel 特殊路径重复判断，也不创建
+        第二套 embedding service。
+
+        - collection 为空（新建 / 尚未写入任何向量）→ 无历史维度约束，放行；
+        - 否则读取既有向量维度与 current_dim 比对；不一致则抛 EmbeddingDimensionMismatch
+          （含 collection 维度、当前维度、模型名、处理建议），禁止静默写入不同维度向量。
+        """
+        try:
+            existing_dim = None
+            if collection.count() > 0:
+                data = collection.get(limit=1, include=['embeddings'])
+                embs = data.get('embeddings') if isinstance(data, dict) else None
+                # Chroma 可能以 numpy 数组返回 embeddings，不能用 `if embs` 判断真值
+                # （会触发 "truth value of an array is ambiguous"）。
+                if embs is not None and len(embs) > 0:
+                    first = embs[0]
+                    if hasattr(first, '__len__'):
+                        existing_dim = len(first)
+        except Exception as e:  # 读维度失败不应阻断写入，仅告警
+            logger.warning(f'读取既有 collection 维度失败（跳过校验）：{e}')
+            return
+
+        if existing_dim is None:
+            logger.info(
+                f'Embedding dimension check: collection={collection.name} '
+                f'existing=none current={current_dim} model={model}'
+            )
+            return
+
+        logger.info(
+            f'Embedding dimension check: collection={collection.name} '
+            f'existing={existing_dim} current={current_dim} model={model}'
+        )
+        if existing_dim != current_dim:
+            raise EmbeddingDimensionMismatch(
+                f"Embedding dimension mismatch.\n"
+                f"Existing Chroma collection dimension: {existing_dim}\n"
+                f"Current embedding model: {model}\n"
+                f"Current embedding dimension: {current_dim}\n"
+                f"Please use the original embedding model "
+                f"or rebuild the vector collection."
+            )
+
     async def add_documents(
         self,
         documents: List[Dict[str, Any]],
@@ -328,9 +389,15 @@ class VectorStoreManager:
                 m['indexed_embedding_model'] = effective_model
             ids = [doc['id'] for doc in documents]
 
-            # 向路由目标 collection 追加文本（add_texts 使用其专属 embeddings 实例）。
-            result_ids = store.add_texts(
-                texts=contents,
+            # 先生成 embedding（统一 batch <=20），再在「单次写入前」做维度兼容校验，
+            # 最后直接写入 Chroma。等价于 add_texts 的内部流程，但把维度校验显式前置，
+            # 避免把不同维度的向量写入同一 collection（所有 TXT/MD/DOCX/PDF/XLSX 共用此路径）。
+            vectors = emb.embed_documents(contents)
+            self._check_dimension_compatibility(
+                store._collection, len(vectors[0]), effective_model)
+            result_ids = store._collection.add(
+                embeddings=vectors,
+                documents=contents,
                 metadatas=metadatas,
                 ids=ids,
             )
@@ -383,7 +450,15 @@ class VectorStoreManager:
                 for m in metas:
                     m['indexed_embedding_model'] = effective_model
                 ids = [c['id'] for c in batch]
-                store.add_texts(texts=texts, metadatas=metas, ids=ids)
+                vectors = emb.embed_documents(texts)
+                self._check_dimension_compatibility(
+                    collection, len(vectors[0]), effective_model)
+                collection.add(
+                    embeddings=vectors,
+                    documents=texts,
+                    metadatas=metas,
+                    ids=ids,
+                )
                 added_ids.extend(ids)
                 logger.info(
                     f'重索引批次 {start // batch_size + 1}/{total_batches} 完成，'
@@ -526,6 +601,10 @@ class VectorStoreManager:
         except Exception as e:
             logger.error(f'重索引生成 embedding 失败，旧版本保留：document_id={document_id}: {e}')
             raise
+
+        # 2.5) 写入前维度兼容校验（target collection 可能已有向量，维度必须等于当前模型输出）
+        self._check_dimension_compatibility(
+            collection, len(new_embeddings[0]), effective_model)
 
         # 3) 删除旧版本 + 写入新版本（失败恢复旧版本）
         try:
