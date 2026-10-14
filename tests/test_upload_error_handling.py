@@ -214,3 +214,142 @@ def test_xlsx_upload_success_route(client, monkeypatch):
     body = resp.json()
     assert body['success'] is True
     assert body['filename'] == 'x.xlsx'
+
+
+# ---------------------------------------------------------------------------
+# F（Phase 1 稳定性）：分批写入 / 回滚 / 超大文档保护
+# ---------------------------------------------------------------------------
+def test_add_documents_batches_chroma_write(monkeypatch):
+    """100 chunks 不应是一次性 collection.add，而应拆成多批（每批<=CHROMA_ADD_BATCH_SIZE）。"""
+    from backend.services.vector_service import VectorStoreManager
+
+    add_calls = []
+    fake_collection = mock.MagicMock()
+    fake_collection.name = 'ai_assistant_docs'
+    fake_collection.add = mock.MagicMock(side_effect=lambda **kw: add_calls.append(kw))
+    fake_collection.delete = mock.MagicMock()
+    fake_store = mock.MagicMock()
+    fake_store._collection = fake_collection
+    fake_emb = mock.MagicMock()
+    fake_emb.embedding_model = 'test-model'
+    fake_emb.embed_documents = lambda texts, model=None: [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+    class _FakeManager(VectorStoreManager):
+        def __init__(self):
+            pass  # 跳过父类 Chroma 客户端初始化，仅验证分批/回滚逻辑
+
+        def _resolve_store(self, model=None):
+            return (fake_store, fake_emb)
+
+        def _check_dimension_compatibility(self, *a, **k):
+            return None
+
+    manager = _FakeManager()
+    n = 100
+    docs = [
+        {'id': f'd_{i}', 'content': f'c{i}', 'metadata': {'document_id': 'd', 'chunk_index': i}}
+        for i in range(n)
+    ]
+    ids = _run(manager.add_documents(docs))
+    assert ids == [f'd_{i}' for i in range(n)]
+    # 拆成多批：100 / 20 = 5 批（不是一次单体 add）
+    assert fake_collection.add.call_count == 5, fake_collection.add.call_count
+    for kw in add_calls:
+        assert len(kw['ids']) <= VectorStoreManager.CHROMA_ADD_BATCH_SIZE
+    all_ids = [i for kw in add_calls for i in kw['ids']]
+    assert all_ids == [f'd_{i}' for i in range(n)]
+
+
+def test_add_documents_rolls_back_on_batch_failure(monkeypatch):
+    """中途某批失败：已写入的当前 document_id 向量必须被删除（Chroma 无残留）。"""
+    from backend.services.vector_service import VectorStoreManager
+
+    add_calls = []
+    fake_collection = mock.MagicMock()
+    fake_collection.name = 'ai_assistant_docs'
+
+    def add_side_effect(**kw):
+        add_calls.append(kw)
+        if len(add_calls) == 2:
+            raise RuntimeError('chroma batch 2 failed')
+        return None
+
+    fake_collection.add = mock.MagicMock(side_effect=add_side_effect)
+    deleted = []
+    fake_collection.delete = mock.MagicMock(
+        side_effect=lambda ids=None, **kw: deleted.extend(ids or []))
+    fake_store = mock.MagicMock()
+    fake_store._collection = fake_collection
+    fake_emb = mock.MagicMock()
+    fake_emb.embedding_model = 'test-model'
+    fake_emb.embed_documents = lambda texts, model=None: [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+    class _FakeManager(VectorStoreManager):
+        def __init__(self):
+            pass
+
+        def _resolve_store(self, model=None):
+            return (fake_store, fake_emb)
+
+        def _check_dimension_compatibility(self, *a, **k):
+            return None
+
+    manager = _FakeManager()
+    n = 50
+    docs = [{'id': f'd_{i}', 'content': f'c{i}', 'metadata': {'document_id': 'd'}}
+            for i in range(n)]
+    with pytest.raises(RuntimeError):
+        _run(manager.add_documents(docs))
+    # 第 2 批失败 → 第 1 批（20 条）已写入，必须被回滚删除，Chroma 无残留
+    assert len(add_calls) == 2
+    assert len(deleted) == 20, deleted
+    assert deleted == [f'd_{i}' for i in range(20)]
+
+
+def test_text_too_many_chunks_returns_friendly_error(monkeypatch):
+    """文本文档 chunk 数超过上限 → 返回 DOCUMENT_TOO_LARGE，且不进入写入阶段。"""
+    class ManyChunksProc:
+        def process_file(self, path):
+            return [{'content': f'c{i}', 'metadata': {}}
+                    for i in range(rs_mod.MAX_DOCUMENT_CHUNKS + 5)]
+
+    monkeypatch.setattr(ds_mod, 'DocumentProcessor', ManyChunksProc)
+    svc = RagService()
+    svc.vector_store = mock.MagicMock()  # add_documents 不应被调用
+    svc._clear_related_cache = mock.AsyncMock()
+    path = _write_tmp('.txt')
+    try:
+        result = _run(svc.process_and_store_document(path, user_id=1, original_filename='big.txt'))
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+    assert result['success'] is False
+    assert result['error_type'] == 'DOCUMENT_TOO_LARGE'
+    assert '上限' in result['error_message']
+    svc.vector_store.add_documents.assert_not_called()
+
+
+def test_table_too_many_chunks_returns_friendly_error(monkeypatch):
+    """表格文档 chunk 数超过上限 → 回滚 Representation/原始文件，返回 DOCUMENT_TOO_LARGE。"""
+    from backend.services import table_representation as tr_mod
+    many = [{'id': f't_{i}', 'content': 'x', 'metadata': {'document_id': 'd'}}
+            for i in range(rs_mod.MAX_DOCUMENT_CHUNKS + 3)]
+    monkeypatch.setattr(rs_mod, 'build_table_chunks', lambda rep, pa: many)
+    monkeypatch.setattr(
+        rs_mod, 'build_representation',
+        lambda *a, **k: {'document_id': 'd', 'workbook': {'sheets': []}})
+    monkeypatch.setattr(rs_mod, 'validate_representation', lambda *a, **k: None)
+    monkeypatch.setattr(tr_mod, 'store_original', lambda fp, did: fp)
+    monkeypatch.setattr(tr_mod, 'save_representation_json', lambda rep: 'x.json')
+    svc = RagService()
+    svc.vector_store = mock.MagicMock()
+    svc._clear_related_cache = mock.AsyncMock()
+    path = _write_tmp('.xlsx')
+    try:
+        result = _run(svc.process_and_store_document(path, user_id=1, original_filename='big.xlsx'))
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+    assert result['success'] is False
+    assert result['error_type'] == 'DOCUMENT_TOO_LARGE'
+    svc.vector_store.add_documents.assert_not_called()

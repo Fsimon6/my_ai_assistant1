@@ -26,6 +26,7 @@ _UPLOAD_ERROR_STATUS = {
     'EMBEDDING_SERVICE_ERROR': 503,
     'EMBEDDING_DIMENSION_MISMATCH': 503,
     'DOCUMENT_PARSE_ERROR': 400,
+    'DOCUMENT_TOO_LARGE': 400,
     'STORAGE_ERROR': 503,
     'UNKNOWN_ERROR': 500,
 }
@@ -38,6 +39,7 @@ _UPLOAD_ERROR_FALLBACK_MESSAGE = {
     'EMBEDDING_SERVICE_ERROR': 'Embedding 服务暂时不可用，请稍后重试。',
     'EMBEDDING_DIMENSION_MISMATCH': 'Embedding 模型维度与已有向量集合不一致，请使用原 embedding 模型或重建向量集合。',
     'DOCUMENT_PARSE_ERROR': '文档解析失败，请检查文件是否损坏或格式是否正确。',
+    'DOCUMENT_TOO_LARGE': '文档过大，请拆分后上传。',
     'STORAGE_ERROR': '向量库写入失败，请稍后重试。',
     'UNKNOWN_ERROR': '文档处理失败，请稍后重试。',
 }

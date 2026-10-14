@@ -365,23 +365,33 @@ class VectorStoreManager:
                 f"or rebuild the vector collection."
             )
 
+    # Chroma 单次写入批大小（仅控制「向量→Chroma 单次 add」批量，与 embedding 内部 ≤20 批解耦）。
+    # 把「一次性单体 add」拆成可回滚的小批：避免大文档上传时单次 add 同步阻塞事件循环过久，
+    # 且任一环节失败可精确删除本 document_id 已写入的 chunk ids（id 形如 document_id_index），
+    # 不影响其他文档/用户。可用环境变量覆盖（保持与 embedding 批一致的数量级）。
+    CHROMA_ADD_BATCH_SIZE = int(os.getenv('CHROMA_ADD_BATCH_SIZE', '20'))
+
     async def add_documents(
         self,
         documents: List[Dict[str, Any]],
         collection_name: str = _LEGACY_COLLECTION,
         embedding_model: str = None,
     ) -> List[str]:
-        """添加文档到向量数据库。
+        """添加文档到向量数据库（分批写入 + 文档级事务回滚）。
 
-        按 embedding_model 路由到对应 collection（全局模型→ai_assistant_docs，
-        自定义模型→ai_assistant_docs__<safe>）。复用单例 Chroma 客户端与单例 chromadb
-        客户端，避免每次上传重建客户端导致查询/删除状态不一致。
-        `collection_name` 仅保留为兼容参数（路由以 embedding_model 为准）。
+        流程：embedding（统一 batch <=20，不在此重复实现）→ 维度兼容校验 → Chroma 分批 add。
+        - 复用单例 Chroma 客户端与单例 embeddings 客户端，按 embedding_model 路由到对应 collection；
+        - 按 CHROMA_ADD_BATCH_SIZE 顺序提交，每批独立日志；
+        - 任一批失败 / 被取消：删除本次已写入、属于该 document_id 的全部 chunk ids（id 形如
+          document_id_index，精确按 id 删除），不影响其他文档/用户；原始异常继续向上抛出。
         """
+        if not documents:
+            return []
+        # 按 embedding_model 路由到正确的 collection 与专属 embeddings（不突变共享实例）。
+        store, emb = self._resolve_store(embedding_model)
+        effective_model = emb.embedding_model
+        added_ids: List[str] = []
         try:
-            # 按 embedding_model 路由到正确的 collection 与专属 embeddings（不突变共享实例）。
-            store, emb = self._resolve_store(embedding_model)
-            effective_model = emb.embedding_model
             # 提取内容和元数据
             contents = [doc['content'] for doc in documents]
             # 复制 metadata，避免就地修改调用方传入的对象
@@ -393,27 +403,60 @@ class VectorStoreManager:
                 m['indexed_embedding_model'] = effective_model
             ids = [doc['id'] for doc in documents]
 
-            # 先生成 embedding（统一 batch <=20），再在「单次写入前」做维度兼容校验，
-            # 最后直接写入 Chroma。等价于 add_texts 的内部流程，但把维度校验显式前置，
-            # 避免把不同维度的向量写入同一 collection（所有 TXT/MD/DOCX/PDF/XLSX 共用此路径）。
+            # 先生成 embedding（统一 batch <=20，内部已分批，不在此重复实现），
+            # 再在「单批写入前」做维度兼容校验，最后分小批写入 Chroma（每批可独立回滚）。
             vectors = emb.embed_documents(contents)
+            if not vectors:
+                return []
             self._check_dimension_compatibility(
                 store._collection, len(vectors[0]), effective_model)
-            result_ids = store._collection.add(
-                embeddings=vectors,
-                documents=contents,
-                metadatas=metadatas,
-                ids=ids,
-            )
 
+            batch_size = self.CHROMA_ADD_BATCH_SIZE
+            total_batches = (len(documents) + batch_size - 1) // batch_size
+            collection = store._collection
+            for start in range(0, len(documents), batch_size):
+                end = start + batch_size
+                collection.add(
+                    embeddings=vectors[start:end],
+                    documents=contents[start:end],
+                    metadatas=metadatas[start:end],
+                    ids=ids[start:end],
+                )
+                added_ids.extend(ids[start:end])
+                logger.info(
+                    f'写入批次 {start // batch_size + 1}/{total_batches} 完成，'
+                    f'本批大小={end - start}，累计={len(added_ids)}'
+                    f'(collection={collection.name}, model={effective_model})'
+                )
             logger.info(
                 f'成功添加{len(documents)}个文档到向量数据库 '
-                f'(collection={store._collection.name}, model={effective_model})'
+                f'(collection={collection.name}, model={effective_model})'
             )
-            return result_ids
+            return added_ids
 
+        except asyncio.CancelledError:
+            # 客户端超时/用户取消/进程被中止 → 任务被取消；必须回滚本次已写入的向量，
+            # 否则留下“半截 vectors”（历史已真实出现过半截向量），绝不吞掉取消。
+            logger.error(f'文档写入被取消（CancelledError），回滚本次写入：累计={len(added_ids)}')
+            if added_ids:
+                try:
+                    store._collection.delete(ids=added_ids)
+                    logger.info(
+                        f'回滚删除 {len(added_ids)} 条本次写入向量，其他文档/用户不受影响'
+                    )
+                except Exception as ce:
+                    logger.warning(f'取消时回滚删除向量失败（忽略）：{ce}')
+            raise
         except Exception as e:
-            logger.error(f'添加文档到向量数据库失败：{e}')
+            logger.error(f'添加文档到向量数据库失败，回滚本次写入：{e}')
+            if added_ids:
+                try:
+                    store._collection.delete(ids=added_ids)
+                    logger.info(
+                        f'回滚删除 {len(added_ids)} 条本次写入向量，其他文档/用户不受影响'
+                    )
+                except Exception as ce:
+                    logger.warning(f'回滚删除向量失败（忽略）：{ce}')
             raise
 
     async def reindex_document(

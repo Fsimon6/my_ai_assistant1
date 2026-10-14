@@ -10,6 +10,10 @@ import logging
 from datetime import datetime
 import re
 
+# 单文档最大 chunk 数（超大文档保护，Phase 1）。超过则直接返回友好错误，
+# 避免进入昂贵的 embedding / Chroma 阶段。可用环境变量 MAX_DOCUMENT_CHUNKS 覆盖。
+MAX_DOCUMENT_CHUNKS = int(os.getenv('MAX_DOCUMENT_CHUNKS', '3000'))
+
 from backend.config.settings import settings
 from backend.services.llm_service import get_llm, LLMFactory, LLMConfig
 from backend.services.vector_service import get_vector_store_manager, EmbeddingError
@@ -90,6 +94,23 @@ class RagService:
             chunks = processor.process_file(file_path)
             parse_done = True  # 解析成功，后续异常归因为存储/写入阶段
 
+            # 超大文档保护：chunk 数超过上限直接返回友好错误，避免进入昂贵的 embedding/Chroma 阶段
+            if len(chunks) > MAX_DOCUMENT_CHUNKS:
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                except OSError:
+                    pass
+                return {
+                    'success': False,
+                    'error_type': 'DOCUMENT_TOO_LARGE',
+                    'error_message': (
+                        f'文档过大（{len(chunks)} 个片段，上限 {MAX_DOCUMENT_CHUNKS}），'
+                        f'请拆分后上传。'
+                    ),
+                    'filename': original_filename or os.path.basename(file_path),
+                }
+
             # 生成单文档级 id（覆盖本次上传的所有 chunk，用于“文档 → 向量”生命周期管理）
             document_id = uuid.uuid4().hex
 
@@ -161,6 +182,13 @@ class RagService:
                     os.remove(file_path)
             except OSError as oe:
                 logger.debug(f'清理失败临时文件出错：{file_path}, {oe}')
+            # 失败回滚：若 Chroma 已写入（add 成功后被后续 cache/文件步骤打断），删除本 document_id
+            # 向量，避免留下孤儿向量（add 自身失败已由 add_documents 内部回滚，此处为安全 no-op）。
+            try:
+                if document_id:
+                    await self.vector_store.delete_documents([document_id], user_id=user_id)
+            except Exception as ve:
+                logger.warning(f'失败回滚 Chroma 向量失败（忽略）：{ve}')
             # 统一结构化错误：按 EmbeddingError / 解析 / 存储 / 未知 分类，返回 error_type + 友好提示。
             return RagService._build_upload_error(e, file_path, parse_done)
 
@@ -246,6 +274,19 @@ class RagService:
             processed_at = datetime.now().isoformat()
             chunks = build_table_chunks(rep, processed_at)
 
+            # 3.5) 超大文档保护：chunk 数超过上限 → 回滚已落盘的 Representation + 原始文件，返回友好错误
+            if len(chunks) > MAX_DOCUMENT_CHUNKS:
+                await RagService._rollback_table_upload(document_id, original_path, file_path, user_id)
+                return {
+                    'success': False,
+                    'error_type': 'DOCUMENT_TOO_LARGE',
+                    'error_message': (
+                        f'文档过大（{len(chunks)} 个片段，上限 {MAX_DOCUMENT_CHUNKS}），'
+                        f'请拆分后上传。'
+                    ),
+                    'filename': original_filename or Path(original_path).name,
+                }
+
             for chunk in chunks:
                 chunk['metadata'].update(metadata or {})
                 if original_filename:
@@ -274,7 +315,7 @@ class RagService:
             # 客户端超时/用户取消/连接断开 → 任务被取消；必须回滚本次产物，否则遗留
             # Representation + 原始文件（甚至 Chroma 半截向量），绝不吞掉取消。
             logger.error(f'表格文档处理被取消（CancelledError），回滚本次产物：document_id={document_id}')
-            RagService._rollback_table_upload(document_id, original_path, file_path, user_id)
+            await RagService._rollback_table_upload(document_id, original_path, file_path, user_id)
             raise  # 原始取消继续向上抛出（由 ASGI 层正常终止请求）
         except Exception as e:
             # 记录完整 traceback，然后回滚本次产物（仅限本次 document_id，绝不波及历史/其他用户），
@@ -283,11 +324,11 @@ class RagService:
                 f'Upload failed: filename={original_filename or os.path.basename(file_path or "")} '
                 f'error_type={RagService._classify_upload_error_type(e, parse_done)}'
             )
-            RagService._rollback_table_upload(document_id, original_path, file_path, user_id)
+            await RagService._rollback_table_upload(document_id, original_path, file_path, user_id)
             return RagService._build_upload_error(e, file_path or original_path or '', parse_done)
 
     @staticmethod
-    def _rollback_table_upload(
+    async def _rollback_table_upload(
         document_id: str,
         original_path: Optional[str],
         file_path: str,
@@ -305,7 +346,7 @@ class RagService:
             try:
                 from backend.services.vector_service import get_vector_store_manager
                 vsm = get_vector_store_manager()
-                vsm.delete_documents([document_id], user_id=user_id)
+                await vsm.delete_documents([document_id], user_id=user_id)
                 logger.info(f'回滚：删除本次 Chroma 向量 document_id={document_id}')
             except Exception as ce:
                 logger.warning(f'回滚删除 Chroma 向量失败（忽略，继续清理文件）：{ce}')
