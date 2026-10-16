@@ -41,6 +41,10 @@ langchain-chroma
 
 # --- 精确查询（Phase 2：Representation -> DuckDB -> NL2SQL）---
 duckdb
+# SQL 安全校验的 AST 解析器：validate_sql 使用 sqlglot（DuckDB dialect）将 SQL 解析为 AST，
+# 递归校验只读语句类型 / 表名白名单 / 危险数据源表函数；解析失败默认拒绝，绝不退回宽松路径。
+# 限定 <31 以保持 AST 节点结构稳定（大版本可能调整解析行为）。
+sqlglot>=25,<31
 
 # --- LangChain（仅项目真实 import 的包）---
 # langchain-classic 核心已自带 langchain-core / langchain-text-splitters / numpy 等

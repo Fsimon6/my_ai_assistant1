@@ -24,6 +24,9 @@ from typing import Any, Dict, List, Optional, Tuple, AsyncGenerator
 
 import duckdb
 
+import sqlglot
+from sqlglot import exp
+
 from backend.config.settings import settings
 from backend.services.table_representation import (
     load_representation,
@@ -364,28 +367,99 @@ def _wrap_with_limit(sql: str, max_rows: int):
     return f'SELECT * FROM ({s}) AS __tq_cap LIMIT {max_rows + 1}'
 
 
+# ----------------------------- SQL 安全校验（AST 基础） -----------------------------
+# 基于 sqlglot（DuckDB dialect）的 AST 解析，作为 SQL 安全校验的可靠基础：
+#  - 仅允许只读 SELECT / 含 CTE 的查询（WITH ... SELECT）
+#  - 所有物理表引用必须 ∈ allowed，递归覆盖 CTE/子查询/JOIN/UNION，并区分 CTE 名与物理表名
+#  - 禁止通过表函数（read_csv 等）、文件字面量（FROM 'x.csv'）、扫描函数（sqlite_scan 等）访问外部数据源
+#  - 允许无外部 I/O 的安全生成器表函数（range/generate_series/unnest 等，用于合法笛卡尔积/展开）
+#  - 禁止 INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/ATTACH/DETACH/COPY/CALL/PRAGMA 等
+#  - 禁止多语句；解析失败默认拒绝，绝不退回更宽松路径
+_DANGEROUS_FUNC = {
+    "readcsv", "readcsvauto", "readparquet", "readjson", "readtext", "readexcel",
+    "readblob", "readiceberg", "sqlitescan", "postgresscan", "mysqlscan",
+    "duckdbscan", "attachment", "pragmatableinfo", "pragmadatabaselist",
+    "pragmafunctionlist", "pragmacollations", "attach", "detach", "copy",
+}
+# 无外部 I/O 的表值生成器（仅用于合法笛卡尔积 / 行展开，不访问任何数据源）
+_SAFE_GENERATOR_FUNCS = {
+    "range", "generateseries", "generate_series", "unnest", "repeat",
+    "stringsplit", "stringtoarray", "flatten", "regexpsplittotable", "explode",
+}
+_FILE_EXTS = (
+    ".csv", ".parquet", ".parq", ".json", ".xlsx", ".xls", ".db",
+    ".duckdb", ".txt", ".tsv", ".gz", ".orc", ".avro",
+)
+
+
+def _norm_ident(name: str) -> str:
+    """归一化标识符用于安全集合匹配（去非字母数字、转小写）。"""
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _func_call_name(node) -> str:
+    """提取函数调用名：具名函数取类名，匿名函数取首标识符。"""
+    if isinstance(node, exp.Anonymous):
+        this = node.this
+        if isinstance(this, exp.Identifier):
+            return this.name
+        return str(this)
+    return type(node).__name__
+
+
 def validate_sql(sql: str, allowed: List[str]) -> None:
-    s = sql.strip()
-    if s.endswith(";"):
-        s = s[:-1].strip()
-    if ";" in s:
+    s = (sql or "").strip()
+    if not s:
+        raise ValueError("SQL 为空")
+    # 解析：语法错误 / 不支持语法 / 歧义一律拒绝（绝不退回宽松路径）
+    try:
+        statements = sqlglot.parse(s, dialect="duckdb")
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"SQL 解析失败，已拒绝执行：{exc}")
+    statements = [st for st in statements if st is not None]
+    if len(statements) != 1:
         raise ValueError("不允许多条 SQL 语句")
-    up = s.upper()
-    if not (up.startswith("SELECT") or up.startswith("WITH")):
-        raise ValueError("只允许 SELECT 查询")
-    forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "ATTACH",
-                 "LOAD", "INSTALL", "COPY", "MERGE", "TRUNCATE", "GRANT", "EXEC",
-                 "PRAGMA", "REPLACE", "VACUUM"]
-    for kw in forbidden:
-        if re.search(r"\b" + kw + r"\b", up):
-            raise ValueError(f"禁止的 SQL 操作: {kw}")
-    low = s.lower()
-    if not any(t.lower() in low for t in allowed):
+    tree = statements[0]
+    # 顶层只允许只读查询（WITH...SELECT 的 root 是 Select，with 为其属性）
+    if not isinstance(tree, (exp.Select, exp.Union)):
+        raise ValueError("只允许 SELECT 查询（含 WITH/CTE）")
+
+    allowed_set = {a.lower() for a in allowed}
+    cte_names = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
+
+    # 危险函数 / 外部数据源函数（含作为表达式使用时）
+    for node in tree.walk():
+        if isinstance(node, (exp.Func, exp.Anonymous)):
+            if _norm_ident(_func_call_name(node)) in _DANGEROUS_FUNC:
+                raise ValueError(f"禁止的 SQL 函数/数据源：{_func_call_name(node)}")
+
+    # 递归检查所有物理表引用（FROM / JOIN / 子查询 / UNION 分支）
+    referenced_tables = set()
+    for table in tree.find_all(exp.Table):
+        name = table.name or ""
+        # 跨 schema / catalog 引用一律禁止
+        if table.db or table.catalog:
+            raise ValueError(f"禁止跨 schema/catalog 引用：{name}")
+        low = name.lower()
+        # CTE 名视为派生表，非物理表（其定义内部已递归检查）
+        if low in cte_names:
+            continue
+        # 空 name 表源：必须是安全的生成器表函数，否则视为外部数据源
+        if not name:
+            src = table.this
+            if isinstance(src, (exp.Func, exp.Anonymous)) and \
+               _norm_ident(_func_call_name(src)) in _SAFE_GENERATOR_FUNCS:
+                continue
+            raise ValueError("禁止引用外部数据源或表函数")
+        # 文件路径 / 外部数据文件字面量
+        if "/" in name or "\\" in name or low.endswith(_FILE_EXTS):
+            raise ValueError(f"禁止引用外部数据源：{name}")
+        if low not in allowed_set:
+            raise ValueError(f"引用了未授权的表：{name}")
+        referenced_tables.add(low)
+
+    if not referenced_tables:
         raise ValueError("SQL 未引用任何允许的表")
-    # 禁止引用非允许表（表名形如 t_<hex>_<idx>）
-    for m in re.findall(r"\b(t_[a-f0-9]+_\d+)\b", low):
-        if m not in allowed:
-            raise ValueError(f"引用了不允许的表: {m}")
 
 
 # ----------------------------- 查询范围 / 来源推导（保证一致） -----------------------------
