@@ -960,10 +960,15 @@ class TableQueryService:
         # （仅改写等值过滤字面量；多候选交由上层澄清，无候选保持原样）。
         sql = self._resolve_sql_values(sql, queried)
 
+        # 纵深防御：值解析会改写 SQL 文本（即使仅替换字面量值），任何最终进入
+        # cache / DuckDB 的 SQL 都必须再次经过 AST 校验，杜绝“修改后未重新校验”窗口。
+        validate_sql(sql, allowed)
+
         # ---- Table Query 结果缓存（性能优化，非正确性依赖）----
-        # 安全前置已完成：validate_sql 已在上方运行；Cache Key 含 user_id / document_id /
-        # allowed_tables / normalized_sql / 数据版本指纹，故跨用户 / 跨文档 / 跨表范围 /
-        # 不同 SQL / 文档内容更新 都不会错误命中。缓存命中绝不跳过 AST 校验。
+        # 安全前置已完成：validate_sql 已在 NL2SQL 后、crosstable 改写后、值解析后
+        # 三次运行（见上文）；Cache Key 含 user_id / document_id / allowed_tables /
+        # normalized_sql / 数据版本指纹，故跨用户 / 跨文档 / 跨表范围 / 不同 SQL /
+        # 文档内容更新 都不会错误命中。缓存命中绝不跳过 AST 校验。
         cache = get_cache_service()
         cache_key = CacheKey.table_query(
             user_id, document_id, allowed,
