@@ -496,16 +496,23 @@ def validate_sql(sql: str, allowed: List[str]) -> None:
 
 # ----------------------------- 查询范围 / 来源推导（保证一致） -----------------------------
 def _parse_referenced_tables(sql: str, allowed: List[str]) -> List[str]:
-    """提取 SQL 实际引用的、且属于 allowed 白名单的表名（t_<hex>_<idx>）。
+    """提取 SQL 实际引用的、且属于 allowed 白名单的物理表名。
 
-    这是“实际查询范围”的唯一事实来源：sources 与 answer 必须与之完全一致，
+    基于 sqlglot AST 遍历所有 exp.Table（兼容引号标识符 / 表别名 / 大小写变体 /
+    非 hex 命名的真实表名），与 validate_sql 的口径完全一致；仅保留在 allowed 内的
+    表。这是“实际查询范围”的事实来源：sources 与 answer 必须与之完全一致，
     杜绝“SQL 只查一张表、sources 却报全部表”的不一致。
     """
-    found = re.findall(r"\b(t_[a-f0-9]+_\d+)\b", sql.lower())
+    try:
+        stmt = sqlglot.parse_one(sql, dialect="duckdb")
+    except Exception:  # noqa: BLE001
+        return []
+    allowed_set = {a.lower() for a in allowed}
     seen: List[str] = []
-    for t in found:
-        if t in allowed and t not in seen:
-            seen.append(t)
+    for table in stmt.find_all(exp.Table):
+        name = (table.name or "").lower()
+        if name and name in allowed_set and name not in seen:
+            seen.append(name)
     return seen
 
 
@@ -528,10 +535,15 @@ _EQ_LITERAL = re.compile(
 )
 
 
-def _parse_referenced_columns(sql: str) -> List[str]:
-    """提取 SQL 中以双引号包裹的业务列名（排除 __ 源列）。"""
+def _parse_referenced_columns(sql: str, exclude=None) -> List[str]:
+    """提取 SQL 中以双引号包裹的业务列名（排除 __ 源列，以及物理表名）。
+
+    exclude 用于传入 allowed / compatible 等物理表名集合，避免把引号包裹的
+    表名（如 FROM "t_xxx_0"）误判为业务列，否则会导致跨表兼容判断失效。
+    """
     cols = re.findall(r'"([^"]+)"', sql)
-    return [c for c in cols if not c.startswith(SRC_PREFIX)]
+    bad = set(exclude) if exclude else set()
+    return [c for c in cols if not c.startswith(SRC_PREFIX) and c not in bad]
 
 
 def _rewrite_cross_table(sql: str, t0: str, compatible: List[str]) -> Optional[str]:
@@ -541,10 +553,7 @@ def _rewrite_cross_table(sql: str, t0: str, compatible: List[str]) -> Optional[s
     （或单文档多表）下对“结构兼容且语义相同”的多个表做统一聚合/筛选。
     返回改写后的 SQL；无法安全改写则返回 None（回退为单表）。
     """
-    pat = re.compile(r"\bFROM\s+" + re.escape(t0) + r"\b", re.IGNORECASE)
-    if not pat.search(sql):
-        return None
-    ref_cols = _parse_referenced_columns(sql)
+    ref_cols = _parse_referenced_columns(sql, compatible)
     if not ref_cols:
         # 未显式引用业务列（如纯 COUNT(*)/SELECT *）：不强行跨表，保持单表，避免语义漂移
         return None
@@ -552,7 +561,12 @@ def _rewrite_cross_table(sql: str, t0: str, compatible: List[str]) -> Optional[s
     subs = " UNION ALL ".join(
         f"(SELECT {proj} FROM {_quote_ident(t)})" for t in compatible
     )
-    return pat.sub(f"FROM ({subs}) AS __u", sql, count=1)
+    # 兼容带引号（NL2SQL 生成的表名常带双引号）与不带引号的表名引用；
+    # 用精确字符串变体替换，避免正则引号边界处理带来的残留引号问题
+    for variant in (f'FROM "{t0}"', f"FROM '{t0}'", f"FROM {t0}"):
+        if variant in sql:
+            return sql.replace(variant, f"FROM ({subs}) AS __u", 1)
+    return None
 
 
 # ----------------------------- 受控值匹配兜底（精确优先） -----------------------------
@@ -681,6 +695,9 @@ class TableQueryService:
             '- 只输出一个 JSON：{"sql": "SELECT ..."}\n'
             "- 字符串使用单引号；精确匹配注意大小写，必要时用 LOWER(TRIM(col)) = LOWER(TRIM('值'))\n"
             "- 支持 COUNT/SUM/AVG/MIN/MAX/GROUP BY/ORDER BY/LIMIT/WHERE\n"
+            "- 问题涉及多张表时，可使用 JOIN / UNION / UNION ALL 跨表查询；"
+            "列名用表别名限定（如 a.\"col\"）。UNION 会去重，UNION ALL 保留全部行；"
+            "全量列举明细时优先 UNION ALL 以免丢失重复行\n"
             "- 禁止任何写操作；禁止多条语句；列名用双引号包裹\n\n"
             f"问题：{question}\n"
         )
@@ -925,7 +942,7 @@ class TableQueryService:
         ref_tables = _parse_referenced_tables(sql, allowed)
         queried = list(ref_tables) or list(allowed)
 
-        ref_cols = _parse_referenced_columns(sql)
+        ref_cols = _parse_referenced_columns(sql, allowed)
         # document_id=None（或全部兼容表 >1）时：若 LLM 仅引用单表、但存在结构兼容的同语义表，
         # 改写为 UNION ALL，使“实际 SQL = 查询范围 = sources = answer 语义”四者完全一致；
         # 若仅单表可用或不兼容，则保持单表，sources 只报实际查询到的那张表。
