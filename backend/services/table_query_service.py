@@ -73,6 +73,15 @@ COLUMN_ALIASES = {
     # 交由 Schema Context 与列名推断，避免误导 NL2SQL 选错列。
     "订单": "Order ID",
     "订单号": "Order ID",
+    # 金额 / 单价 语义区分（精确短语；不映射裸“价格”，避免误伤 SKU 单价查询）
+    "订单金额": "Order Amount",
+    "订单价格": "Order Amount",
+    "总价": "Order Amount",
+    "成交金额": "Order Amount",
+    "商品单价": "SKU Unit Original Price",
+    "SKU单价": "SKU Unit Original Price",
+    "原始单价": "SKU Unit Original Price",
+    "单位价格": "SKU Unit Original Price",
 }
 VALUE_ALIASES = {
     "金眼": "golden eye",
@@ -316,13 +325,27 @@ def _get_llm_explain() -> Any:
 
 
 def _extract_sql_json(text: str) -> str:
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        raise ValueError("LLM 未返回有效 JSON")
-    obj = json.loads(m.group(0))
-    sql = obj.get("sql")
-    if not sql:
+    t = (text or "").strip()
+    if not t:
+        raise ValueError("LLM 未返回有效 JSON（空响应）")
+    # 1) 优先剥离 markdown 代码围栏（```json ... ``` 或 ``` ... ```）
+    fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", t, re.DOTALL)
+    if fence:
+        t = fence.group(1).strip()
+    # 2) 定位首个 '{'，用 JSONDecoder.raw_decode 容忍前后的说明文字，
+    #    并严格按 JSON 规范解析（SQL 字符串内部的 '{' / '}' 视为字面量，不会被误截断）。
+    idx = t.find("{")
+    if idx == -1:
+        raise ValueError("LLM 未返回有效 JSON（缺少 {）")
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(t[idx:])
+    except json.JSONDecodeError as e:
+        raise ValueError(f"LLM 返回的 JSON 无法解析：{e}")
+    if not isinstance(obj, dict) or "sql" not in obj:
         raise ValueError("JSON 缺少 sql 字段")
+    sql = obj.get("sql")
+    if not isinstance(sql, str) or not sql.strip():
+        raise ValueError("JSON 中的 sql 字段为空或非法")
     return sql.strip().rstrip(";")
 
 
@@ -693,12 +716,19 @@ class TableQueryService:
             f"{alias}\n\n"
             "规则：\n"
             '- 只输出一个 JSON：{"sql": "SELECT ..."}\n'
-            "- 字符串使用单引号；精确匹配注意大小写，必要时用 LOWER(TRIM(col)) = LOWER(TRIM('值'))\n"
+            "- 金额与单价区分：问题含“订单金额/订单价格/总价/成交金额”时使用 Order Amount 列；"
+            "含“SKU 单价/商品单价/原始单价/单位价格”时使用 SKU Unit Original Price 列；"
+            "泛指“价格”且针对订单整体（如“价格最高的订单”）默认使用 Order Amount。\n"
+            "- 字符串过滤统一写成 LOWER(TRIM(\"列名\")) = LOWER(TRIM('值')) 形式，单层括号严格成对，"
+            "不要写成裸 '值' 或在语句末尾附加多余括号。\n"
             "- 支持 COUNT/SUM/AVG/MIN/MAX/GROUP BY/ORDER BY/LIMIT/WHERE\n"
             "- 问题涉及多张表时，可使用 JOIN / UNION / UNION ALL 跨表查询；"
             "列名用表别名限定（如 a.\"col\"）。UNION 会去重，UNION ALL 保留全部行；"
             "全量列举明细时优先 UNION ALL 以免丢失重复行\n"
-            "- 禁止任何写操作；禁止多条语句；列名用双引号包裹\n\n"
+            "- 禁止任何写操作；禁止多条语句；列名用双引号包裹\n"
+            "- 只输出上述单个 JSON，确保 SQL 语法完整、括号严格成对、不要添加任何多余括号或注释；"
+            "计数请统一使用 COUNT(*)，聚合使用 COUNT(列)/SUM(列)/AVG(列)/MIN(列)/MAX(列)，"
+            "函数括号必须完整闭合。\n\n"
             f"问题：{question}\n"
         )
         llm = _get_llm_nl2sql()
