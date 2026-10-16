@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     # SQL 结果最大返回行数（服务端保护）：仅作用于 PRECISE_QUERY 路径。
     # 超限时明确返回“结果被限制”状态，绝不静默截断并谎称完整结果。
     SQL_MAX_RESULT_ROWS: int = 2000
+    # Table Query 结果缓存 TTL（秒）：仅作为兜底过期，避免极低概率的陈旧结果残留。
+    # 正常失效由 Cache Key 内置的「数据版本指纹」保证——文档内容变化即自动 MISS，
+    # 因此该 TTL 仅用于防御性兜底，而非主要失效手段。默认 600s（10 分钟）。
+    TABLE_QUERY_CACHE_TTL: int = 600
 
     model_config = SettingsConfigDict(
         env_file=".env",

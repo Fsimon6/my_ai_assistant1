@@ -34,6 +34,7 @@ from backend.services.table_representation import (
     TABLE_EXTENSIONS,
 )
 from backend.services.llm_service import LLMFactory, LLMConfig
+from backend.services.cache_service import get_cache_service, CacheKey
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +195,7 @@ class DuckDBTableEngine:
             return dt
         return str(raw)
 
-    def register_one(self, doc_id, user_id, filename, sheet_name, table, sheet_idx):
+    def register_one(self, doc_id, user_id, filename, sheet_name, table, sheet_idx, rep_version):
         cols = table.get("columns", [])
         rows = table.get("rows", [])
         # 先剔除被 Phase 1 表头检测误判为数据的“描述行”，再采样/入库，
@@ -238,15 +239,16 @@ class DuckDBTableEngine:
             self.con.executemany(f"INSERT INTO {tname} VALUES ({placeholders})", data)
         self.table_meta[tname] = {
             "user_id": str(user_id), "document_id": doc_id, "filename": filename,
-            "sheet_name": sheet_name, "columns": biz,
+            "sheet_name": sheet_name, "columns": biz, "rep_version": rep_version,
         }
 
     def register_representation(self, rep: Dict[str, Any], user_id: Any):
         doc_id = rep.get("document_id")
         filename = rep.get("filename")
+        rep_version = _rep_data_version(rep)
         for si, sheet in enumerate(rep.get("workbook", {}).get("sheets", [])):
             for table in sheet.get("tables", []):
-                self.register_one(doc_id, user_id, filename, sheet.get("sheet_name"), table, si)
+                self.register_one(doc_id, user_id, filename, sheet.get("sheet_name"), table, si, rep_version)
 
     @staticmethod
     def _is_junk_header_row(row: Dict[str, Any], cols: List[Dict[str, Any]]) -> bool:
@@ -405,6 +407,36 @@ def _func_call_name(node) -> str:
             return this.name
         return str(this)
     return type(node).__name__
+
+
+def _rep_data_version(rep: Dict[str, Any]) -> str:
+    """对 Representation 的业务数据做确定性指纹（sha256 前 16 位）。
+
+    仅基于 workbook 的表结构 + 行数据，反映「实际查询返回的内容」。
+    文件名 / 描述变化不影响指纹；行列数据变化必然改变指纹。
+    用于 Table Query Cache Key 的 scope_version，使文档内容更新后旧缓存自动失效。
+    """
+    import hashlib
+    import json
+
+    canonical = json.dumps(
+        rep.get("workbook", {}), sort_keys=True, ensure_ascii=False, default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_sql(sql: str) -> str:
+    """对 SQL 做语义归一用于缓存键：小写化关键字、统一空白、规范结构。
+
+    若解析失败则回退为原 SQL（缓存粒度变粗但不影响正确性）。
+    注意：sqlglot 的 normalize 只做格式化，绝不合并语义不同的 SQL。
+    """
+    try:
+        return sqlglot.parse_one(sql, dialect="duckdb").sql(
+            dialect="duckdb", normalize=True
+        )
+    except Exception:  # noqa: BLE001
+        return sql
 
 
 def validate_sql(sql: str, allowed: List[str]) -> None:
@@ -852,6 +884,35 @@ class TableQueryService:
         return [t for t, cmap in pairs
                 if all(cmap.get(col) == ref_types[col] for col in ref_cols)]
 
+    # ---- Table Query 结果缓存辅助（性能优化，非正确性依赖）----
+    def _scope_version(self, allowed: List[str]) -> str:
+        """基于所有 allowed 表的 rep_version 组合出数据版本指纹。
+        任一表内容变化都会改变指纹，使对应缓存自动 MISS。
+        """
+        import hashlib
+
+        vers = []
+        for t in allowed:
+            meta = self.engine.table_meta.get(t)
+            vers.append(meta.get("rep_version", "unknown") if meta else "missing")
+        return hashlib.sha256("|".join(sorted(vers)).encode()).hexdigest()[:16]
+
+    async def _try_cache_get(self, cache, key: str):
+        try:
+            val = await cache.get(key)
+            if isinstance(val, tuple) and len(val) == 4:
+                return val
+            return None
+        except Exception:  # noqa: BLE001
+            logger.warning("Table query cache read failed key=%s", key)
+            return None
+
+    async def _try_cache_set(self, cache, key: str, value) -> None:
+        try:
+            await cache.set(key, value, ttl=settings.TABLE_QUERY_CACHE_TTL)
+        except Exception:  # noqa: BLE001
+            logger.warning("Table query cache write failed key=%s", key)
+
     async def _pipeline(self, user_id: Any, question: str, document_id: Optional[str]):
         allowed = self._allowed(user_id, document_id)
         if not allowed:
@@ -882,8 +943,33 @@ class TableQueryService:
         # （仅改写等值过滤字面量；多候选交由上层澄清，无候选保持原样）。
         sql = self._resolve_sql_values(sql, queried)
 
+        # ---- Table Query 结果缓存（性能优化，非正确性依赖）----
+        # 安全前置已完成：validate_sql 已在上方运行；Cache Key 含 user_id / document_id /
+        # allowed_tables / normalized_sql / 数据版本指纹，故跨用户 / 跨文档 / 跨表范围 /
+        # 不同 SQL / 文档内容更新 都不会错误命中。缓存命中绝不跳过 AST 校验。
+        cache = get_cache_service()
+        cache_key = CacheKey.table_query(
+            user_id, document_id, allowed,
+            _normalize_sql(sql), self._scope_version(allowed),
+        )
+        cached = await self._try_cache_get(cache, cache_key)
+        if cached is not None:
+            logger.info(
+                "Table query cache HIT user=%s doc=%s key=%s",
+                user_id, document_id, cache_key,
+            )
+            cols, rows, match_mode, truncated = cached
+            sources = self._derive_sources(queried, cols, rows)
+            return sql, cols, rows, match_mode, sources, truncated
+
         cols, rows, match_mode, truncated = self._execute_with_fallback(sql)
         sources = self._derive_sources(queried, cols, rows)
+
+        await self._try_cache_set(cache, cache_key, (cols, rows, match_mode, truncated))
+        logger.info(
+            "Table query cache MISS user=%s doc=%s key=%s",
+            user_id, document_id, cache_key,
+        )
         return sql, cols, rows, match_mode, sources, truncated
 
     # ---- 解释 ----

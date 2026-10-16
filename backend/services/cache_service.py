@@ -98,6 +98,24 @@ class CacheKey:
         kay_str = f'embedding:{model}:{text}'
         return f'cache:{hashlib.md5(kay_str.encode()).hexdigest()}'
 
+    @staticmethod
+    def table_query(user_id, document_id, allowed_tables, normalized_sql: str, scope_version: str) -> str:
+        """Table Query 结果缓存键。
+
+        组合维度（任一不同即视为不同查询）：
+        - user_id         : 用户隔离，避免跨用户命中他人结果
+        - document_id     : 文档隔离（全部表查询时为 'ALL'）
+        - allowed_tables  : 表范围隔离（排序后拼接，区分实际数据范围）
+        - normalized_sql  : SQL 语义归一（大小写/空白归一，结构不同则 key 不同）
+        - scope_version   : 数据版本指纹（文档内容变化自动改变，旧缓存自然 MISS）
+        仅返回 md5 摘要，日志中也不应打印完整 SQL。
+        """
+        import hashlib
+        doc = document_id if document_id else 'ALL'
+        tbls = ','.join(sorted(allowed_tables)) if allowed_tables else 'NONE'
+        key_str = f'table_query:{user_id}:{doc}:{tbls}:{normalized_sql}:{scope_version}'
+        return f'cache:{hashlib.md5(key_str.encode()).hexdigest()}'
+
 
 # 单例实例
 _cache_service = None
